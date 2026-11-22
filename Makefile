@@ -35,7 +35,7 @@ else
 	@echo "Skipping mypy because the engine package is absent."
 endif
 ifneq ($(TESTS),)
-	$(BIN)/pytest -q tests
+	$(BIN)/pytest -q
 else
 	@echo "Skipping pytest because the tests directory is absent."
 endif
