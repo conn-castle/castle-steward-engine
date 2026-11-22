@@ -4,15 +4,10 @@
 # and re-run `al sync` to apply changes.
 
 # Optional: keep uncommented to ignore .agent-layer/ config.
-# Everything under .agent-layer/ stays ignored (env, state, client config) except the
-# one canonical conventions file, which is part of the engine's public source.
-/.agent-layer/*
-!/.agent-layer/instructions/
-/.agent-layer/instructions/*
-!/.agent-layer/instructions/04_conventions.md
+/.agent-layer/
 # Optional: uncomment to ignore docs/agent-layer/ project memory.
 # Edit .agent-layer/gitignore.block (not .gitignore) to change this entry.
-/docs/agent-layer/
+# /docs/agent-layer/
 
 # Agent Layer-generated instruction shims
 /AGENTS.md
@@ -49,7 +44,15 @@
 /grove/
 # <<< agent-layer
 
-# Stew job state (castle-steward run data lives under the checkout by default)
+# Track the engine conventions and ignore other Agent Layer files.
+!/.agent-layer/
+/.agent-layer/*
+!/.agent-layer/instructions/
+/.agent-layer/instructions/*
+!/.agent-layer/instructions/04_conventions.md
+/docs/agent-layer/
+
+# Engine job state lives under the worker checkout by default.
 /.castle-steward/
 
 # Python

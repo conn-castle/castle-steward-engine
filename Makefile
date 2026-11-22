@@ -28,10 +28,14 @@ check:                     ## non-mutating: ruff format --check, ruff check, myp
 	$(BIN)/ruff check .
 	$(MAKE) check-python
 
-check-python:              ## run mypy and pytest when the engine or tests are present
-ifeq ($(ENGINE)$(TESTS),)
-	@echo "Skipping mypy and pytest because engine code and tests are absent."
+check-python:              ## type-check the engine and run tests when present
+ifneq ($(ENGINE),)
+	$(BIN)/mypy
 else
-	$(BIN)/mypy $(if $(ENGINE),,$(TESTS))
-	$(BIN)/pytest -q
+	@echo "Skipping mypy because the engine package is absent."
+endif
+ifneq ($(TESTS),)
+	$(BIN)/pytest -q tests
+else
+	@echo "Skipping pytest because the tests directory is absent."
 endif

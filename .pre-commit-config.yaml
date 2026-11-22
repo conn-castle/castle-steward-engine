@@ -23,7 +23,7 @@ repos:
         language: system
         types_or: [python, pyi]
       - id: check-python
-        name: mypy and pytest when Python code is present
+        name: Engine type checks and tests
         entry: make check-python
         language: system
         pass_filenames: false
