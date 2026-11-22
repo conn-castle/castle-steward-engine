@@ -1,1 +1,19 @@
-# castle-steward-engine
+# Castle Steward Engine
+
+Castle Steward Engine coordinates coding jobs in a worker checkout. The intended
+workflow scopes a task, runs implementation and review, and pauses when human
+input is needed. Job inspection shows the saved state of a job.
+
+Repository setup is landing first. The engine is under development. Live agent
+execution requires Agent Layer to accept per-invocation MCP configuration on
+both start and continue.
+
+## Development
+
+Install a current release of uv, then run `make bootstrap` to create the
+virtual environment at `.venv` and install Git hooks. uv selects the Python
+version pinned in `pyproject.toml`.
+
+- `make check` runs Ruff, type-checks the engine when present, and runs pytest
+  when `tests/` exists.
+- `make hooks-check` runs both hook stages across tracked and untracked project files.
