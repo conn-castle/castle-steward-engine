@@ -1,0 +1,63 @@
+# >>> agent-layer
+# Template hash: 1a7f365f8f46e878889ea8553a4ff1d57022bb947e83fce804a42356c0093a5c
+# Managed by Agent Layer. To customize, edit .agent-layer/gitignore.block
+# and re-run `al sync` to apply changes.
+
+# Optional: keep uncommented to ignore .agent-layer/ config.
+# Everything under .agent-layer/ stays ignored (env, state, client config) except the
+# one canonical conventions file, which is part of the engine's public source.
+/.agent-layer/*
+!/.agent-layer/instructions/
+/.agent-layer/instructions/*
+!/.agent-layer/instructions/04_conventions.md
+# Optional: uncomment to ignore docs/agent-layer/ project memory.
+# Edit .agent-layer/gitignore.block (not .gitignore) to change this entry.
+/docs/agent-layer/
+
+# Agent Layer-generated instruction shims
+/AGENTS.md
+/.github/copilot-instructions.md
+
+# Agent Layer-generated client configs + artifacts
+# These may contain resolved secrets from .agent-layer/.env — keep gitignored.
+/.agent/
+/.agents/
+/.mcp.json
+/.mcp.json.tmp-*
+/.codex/
+/.copilot/
+/.gemini/
+/.grok/
+/.grok-config/
+/.muse/hooks.json
+/.muse/agent-layer-policy.json
+/.muse-config/
+/.muse-data/
+
+# Antigravity workspace marker (auto-created by agy; symlinks store per-user paths)
+/.antigravitycli/
+
+# Antigravity repo-local data dir (al sync regenerates managed files)
+/.agy/
+/.claude/
+/.claude-config/
+/.vscode/mcp.json
+# Optional: keep uncommented to ignore VS Code settings.
+/.vscode/settings.json
+
+# Grove local state
+/grove/
+# <<< agent-layer
+
+# Stew job state (castle-steward run data lives under the checkout by default)
+/.castle-steward/
+
+# Python
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+/.venv/
+/build/
+/dist/
