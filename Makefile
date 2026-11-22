@@ -1,17 +1,18 @@
 # Developer entry points. CI runs `install`, `check`, then the commit-stage hooks.
-VENV ?= .venv
-BIN  := $(VENV)/bin
-PYTHON_PATHS := $(wildcard castle_steward_engine tests)
+# Match the virtual environment used by the Git hooks and CI.
+override BIN := .venv/bin
+ENGINE := $(wildcard castle_steward_engine)
+TESTS := $(wildcard tests)
 
 .PHONY: bootstrap install hooks hooks-check fmt check check-python
 
-bootstrap: install hooks   ## one-time setup in a clone
+bootstrap: hooks           ## one-time setup in a clone
 
 install:                   ## create the virtual environment and install development dependencies
-	uv venv --allow-existing $(VENV)
-	uv pip install --python $(BIN)/python --group dev $(if $(wildcard castle_steward_engine),-e .)
+	uv venv --allow-existing .venv
+	uv pip install --python $(BIN)/python --group dev $(if $(ENGINE),-e .)
 
-hooks:                     ## install the pre-commit and pre-push git hooks
+hooks: install             ## install the pre-commit and pre-push git hooks
 	$(BIN)/pre-commit install --install-hooks
 
 hooks-check:               ## both hook stages on every project file, tracked or not
@@ -28,9 +29,9 @@ check:                     ## non-mutating: ruff format --check, ruff check, myp
 	$(MAKE) check-python
 
 check-python:              ## run mypy and pytest when the engine or tests are present
-ifeq ($(PYTHON_PATHS),)
+ifeq ($(ENGINE)$(TESTS),)
 	@echo "Skipping mypy and pytest because engine code and tests are absent."
 else
-	$(BIN)/mypy
+	$(BIN)/mypy $(if $(ENGINE),,$(TESTS))
 	$(BIN)/pytest -q
 endif

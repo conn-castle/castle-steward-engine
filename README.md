@@ -10,8 +10,9 @@ both start and continue.
 
 ## Development
 
-Install uv, then run `make bootstrap` to create the virtual environment and
-install Git hooks. uv selects the Python version pinned in `pyproject.toml`.
+Install uv, then run `make bootstrap` to create the virtual environment at
+`.venv` and install Git hooks. uv selects the Python version pinned in
+`pyproject.toml`.
 
 - `make check` runs Ruff and, when engine code or tests are present, mypy and pytest.
 - `make hooks-check` runs both hook stages across tracked and untracked project files.
