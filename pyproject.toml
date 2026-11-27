@@ -5,16 +5,25 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "castle-steward-engine"
 version = "0.1.0"
-description = "Durable coding-job graph driven through the Agent Layer CLI."
+description = "Durable workflow engine driven through the Agent Layer CLI."
 readme = "README.md"
 requires-python = "==3.15.2"
 dependencies = [
+    "alembic>=1.16",
     "langgraph>=1.2.24",
     "langgraph-checkpoint-sqlite>=2",
     "mcp>=2.3,<3",  # stdio server and client APIs from MCP SDK 2.x
     "pydantic>=2.7",
-    "typing-extensions>=4.12",
+    "pydantic-settings>=2.0",
+    "sqlalchemy>=2.1",
+    "sqlmodel>=0.0.50",
 ]
+
+[project.scripts]
+stew = "castle_steward_engine.cli:main"
+
+[project.entry-points."castle_steward_engine.workflows"]
+coding = "castle_steward_coding:WORKFLOW"
 
 [dependency-groups]
 # Pin dev tools so local checks and CI use the same versions.
@@ -26,7 +35,10 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["castle_steward_engine*"]
+include = ["castle_steward_engine*", "castle_steward_coding*"]
+
+[tool.alembic]
+script_location = "%(here)s/castle_steward_engine/migrations"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -35,17 +47,22 @@ testpaths = ["tests"]
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM"]
+select = ["E", "F", "I", "B", "UP", "SIM", "A", "C90", "RUF", "PIE"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 11
 
 [tool.ruff.lint.per-file-ignores]
-# Prose for agents: long lines inside the prompt strings are deliberate.
-"castle_steward_engine/workflows/coding/config.py" = ["E501"]
+# Prose for agents: long lines inside prompt templates are deliberate.
+"castle_steward_coding/prompt_templates.py" = ["E501"]
+# End-to-end workflow tests use multi-turn FakeAgentLayer dispatch closures.
+"tests/*" = ["C901"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["castle_steward_engine", "tests"]
+known-first-party = ["castle_steward_engine", "castle_steward_coding", "tests"]
 
 [tool.mypy]
-files = ["castle_steward_engine"]
+files = ["castle_steward_engine", "castle_steward_coding", "tests"]
 check_untyped_defs = true
 no_implicit_optional = true
 strict_equality = true

@@ -1,5 +1,5 @@
 # >>> agent-layer
-# Template hash: 1a7f365f8f46e878889ea8553a4ff1d57022bb947e83fce804a42356c0093a5c
+# Template hash: c6c31057da973354c682b7c3267cff901fe49b6af784d7a045b9e93f4b76f467
 # Managed by Agent Layer. To customize, edit .agent-layer/gitignore.block
 # and re-run `al sync` to apply changes.
 
@@ -7,7 +7,7 @@
 /.agent-layer/
 # Optional: uncomment to ignore docs/agent-layer/ project memory.
 # Edit .agent-layer/gitignore.block (not .gitignore) to change this entry.
-# /docs/agent-layer/
+/docs/agent-layer/
 
 # Agent Layer-generated instruction shims
 /AGENTS.md
@@ -43,17 +43,6 @@
 # Grove local state
 /grove/
 # <<< agent-layer
-
-# Track the engine conventions and ignore other Agent Layer files.
-!/.agent-layer/
-/.agent-layer/*
-!/.agent-layer/instructions/
-/.agent-layer/instructions/*
-!/.agent-layer/instructions/04_conventions.md
-/docs/agent-layer/
-
-# Engine job state lives under the worker checkout by default.
-/.castle-steward/
 
 # Python
 __pycache__/
