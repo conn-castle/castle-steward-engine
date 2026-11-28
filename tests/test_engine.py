@@ -1063,3 +1063,49 @@ def test_check_only_completion_nudge_invalidation_and_inactive_tool(tmp_path: Pa
         done = eng3.run(j3)
         assert done.phase == "completed" and done.state is not None
         assert done.state["summary"] == "use-human-value"
+
+
+class _BranchIn(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class _BranchBaseState(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    input: _BranchIn
+    flag: bool = False
+
+
+class _BranchSubState(_BranchBaseState):
+    extra_val: str = "kept"
+
+
+def test_branch_router_preserves_subclass_state(tmp_path: Path) -> None:
+    seen: list[tuple[type[BaseModel], str]] = []
+    bad = False
+
+    def route(state: _BranchBaseState) -> str:
+        assert isinstance(state, _BranchSubState)
+        seen.append((type(state), state.extra_val))
+        if bad:
+            return "bogus"
+        return "done" if state.flag else "go"
+
+    g: Graph[_BranchSubState] = Graph()
+    g.step("init", lambda _s, _j: {"flag": True, "extra_val": "updated"})
+    g.step("finish", lambda _s, _j: {})
+    g.entry("init")
+    g.branch("init", route, {"go": "init", "done": "finish"})
+    g.edge("finish", END)
+    wf = Workflow(name="sub", version="1.0.0", input=_BranchIn, state=_BranchSubState, graph=g)
+    al = FakeAgentLayer({"sub": wf}, lambda _c: None)
+    with Engine(state_dir=tmp_path / "st", agent_layer=al, workflows={"sub": wf}) as eng:
+        st = eng.run(eng.start("sub", {}))
+        assert st.phase == "completed" and st.state == {
+            "input": {},
+            "flag": True,
+            "extra_val": "updated",
+        }
+        assert seen == [(_BranchSubState, "updated")]
+        bad = True
+        with pytest.raises(EngineError, match=r"'init'.*'bogus'.*done, go"):
+            eng.run(eng.start("sub", {}))

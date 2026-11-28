@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -160,6 +160,16 @@ def is_ancestor(checkout: Path, ancestor: str, descendant: str) -> bool:
     )
 
 
+def _require_clean_checkout(checkout: Path) -> None:
+    dirty = dirty_status(checkout)
+    if dirty:
+        preview = ", ".join(dirty[:5])
+        raise ValueError(
+            f"Checkout has uncommitted changes ({len(dirty)} file(s): {preview}). "
+            "Commit or discard all changes first."
+        )
+
+
 def verify_commit_lineage(
     checkout: Path,
     *,
@@ -169,13 +179,7 @@ def verify_commit_lineage(
 ) -> str:
     """Validate clean checkout and descendant Git lineage from `baseline_sha`."""
     try:
-        dirty = dirty_status(checkout)
-        if dirty:
-            preview = ", ".join(dirty[:5])
-            raise ValueError(
-                f"Checkout has uncommitted changes ({len(dirty)} file(s): {preview}). "
-                "Commit or discard all changes first."
-            )
+        _require_clean_checkout(checkout)
         head = head_sha(checkout)
         if expected_head is not None and head != expected_head:
             raise ValueError(f"Expected HEAD {expected_head!r}, but checkout HEAD is {head!r}.")
@@ -192,6 +196,42 @@ def verify_commit_lineage(
         raise ValueError(str(exc)) from exc
 
 
+def _require_branch(checkout: Path) -> str:
+    branch = current_branch(checkout)
+    if branch == "HEAD":
+        raise ValueError("Checkout is in detached HEAD state; check out a branch first.")
+    return branch
+
+
+def _parse_pr_json(stdout: str, args: Sequence[str], checkout: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise GitHubError(f"Invalid JSON from gh {' '.join(args)} in {checkout}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise GitHubError(f"Expected JSON object from gh CLI, got {type(data).__name__}")
+    return data
+
+
+def _validate_open_branch_pr(
+    data: dict[str, Any], *, branch: str, expected_pr: int | None = None
+) -> int:
+    raw_number = data.get("number")
+    if type(raw_number) is not int or raw_number <= 0:
+        raise ValueError(f"Pull request has invalid number: {raw_number!r}")
+    if expected_pr is not None and raw_number != expected_pr:
+        raise ValueError(f"PR #{raw_number} does not match expected PR #{expected_pr}")
+    state = str(data.get("state") or "")
+    if state != "OPEN":
+        raise ValueError(f"PR #{raw_number} state is {state or 'UNKNOWN'}, expected OPEN")
+    head_branch = str(data.get("headRefName") or "")
+    if head_branch != branch:
+        raise ValueError(
+            f"PR #{raw_number} branch {head_branch!r} does not match checked-out branch {branch!r}"
+        )
+    return raw_number
+
+
 def verify_shipped_pr(
     checkout: Path,
     *,
@@ -205,21 +245,13 @@ def verify_shipped_pr(
         expected_head=expected_head,
         require_new_commit=False,
     )
+    branch = _require_branch(checkout)
     try:
         data = _view_pr(checkout, expected_pr)
     except GitHubError as exc:
         raise ValueError(f"Could not read pull request via gh: {exc}") from exc
 
-    raw_number = data.get("number")
-    if type(raw_number) is not int or raw_number <= 0:
-        raise ValueError(f"Pull request has invalid number: {raw_number!r}")
-    pr_number = raw_number
-    if expected_pr is not None and pr_number != expected_pr:
-        raise ValueError(f"PR #{pr_number} does not match expected PR #{expected_pr}")
-
-    state = str(data.get("state") or "")
-    if state != "OPEN":
-        raise ValueError(f"PR #{pr_number} state is {state or 'UNKNOWN'}, expected OPEN")
+    pr_number = _validate_open_branch_pr(data, branch=branch, expected_pr=expected_pr)
     if bool(data.get("isDraft", False)):
         raise ValueError(f"PR #{pr_number} is still a draft; mark it ready for review")
 
@@ -232,15 +264,40 @@ def verify_shipped_pr(
     return pr_number, remote_head
 
 
+def probe_ship_pr(
+    checkout: Path,
+    *,
+    expected_head: str,
+    expected_pr: int | None = None,
+) -> tuple[int, str] | None:
+    """Validate branch cleanliness and probe GitHub for an existing ready PR at `expected_head`."""
+    _require_clean_checkout(checkout)
+    branch = _require_branch(checkout)
+    args = ["pr", "view"]
+    if expected_pr is not None:
+        args.append(str(expected_pr))
+    args.extend(["--json", _PR_VIEW_FIELDS])
+    proc = _run_gh(checkout, *args, check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip() or f"exit code {proc.returncode}"
+        if expected_pr is None and "no pull requests found for branch" in detail.lower():
+            return None
+        raise GitHubError(f"gh {' '.join(args)} failed in {checkout}: {detail}")
+    data = _parse_pr_json(proc.stdout, args, checkout)
+
+    pr_number = _validate_open_branch_pr(data, branch=branch, expected_pr=expected_pr)
+    remote_head = str(data.get("headRefOid") or "")
+    if bool(data.get("isDraft", False)) or remote_head != expected_head:
+        return None
+    return pr_number, remote_head
+
+
 def _view_pr(checkout: Path, pr_number: int | None = None) -> dict[str, Any]:
     args = ["pr", "view"]
     if pr_number is not None:
         args.append(str(pr_number))
     args.extend(["--json", _PR_VIEW_FIELDS])
-    data = json.loads(_run_gh(checkout, *args).stdout)
-    if not isinstance(data, dict):
-        raise GitHubError(f"Expected JSON object from gh CLI, got {type(data).__name__}")
-    return data
+    return _parse_pr_json(_run_gh(checkout, *args).stdout, args, checkout)
 
 
 def _merge_commit_sha(data: dict[str, Any]) -> str | None:

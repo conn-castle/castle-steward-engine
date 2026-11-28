@@ -9,14 +9,17 @@ points (`castle_steward_engine.workflows`).
 - `castle_steward_engine`: Generic workflow SDK, SQLite state store + LangGraph checkpointing,
   thin `al -q dispatch` client, per-session stdio MCP server (session files + completion checks;
   never touches SQLite), and `stew` CLI. Never imports workflow packages.
-- `castle_steward_coding`: Declarative coding workflow (`resolve_setup -> coordinate ->
-  assign_agents -> plan? -> implement -> parallel review -> ship -> merge gate ->
-  exact-head merge -> verify -> cleanup`). Consolidates `coordinate`, `triage_repair`, and
-  `merge_gate` under a fresh-session `orchestrator` role paired with deterministic, quota-aware
-  coder and cross-family reviewer routing. Separates internal state (`models.py`), deterministic
-  routing (`routing.py`), agent-facing MCP tool contracts (`tools.py`), and pure agent-facing
-  prompt templates (`prompt_templates.py`). Imports only top-level `castle_steward_engine` public
-  exports.
+- `castle_steward_coding`: Declarative coding workflows registered via entry points: combined
+  `code-and-ship` (`resolve_setup -> coordinate -> assign_agents -> plan? -> implement -> parallel
+  review -> ship -> merge gate -> exact-head merge -> verify -> cleanup`) alongside separately
+  runnable `code` (local implementation + single-pass code review + mirror cleanup) and `ship` (PR shipment,
+  readiness, merge gate, repair + repair code-review loop, exact-head merge, and cleanup; `code`
+  and `ship` do not chain statefully, and `ship` reviews repair commits rather than the initial
+  branch). Consolidates `coordinate`, `triage_repair`, and `merge_gate` under a fresh-session
+  `orchestrator` role paired with deterministic, quota-aware coder and cross-family reviewer
+  routing. Separates internal state (`models.py`), deterministic routing (`routing.py`),
+  agent-facing MCP tool contracts (`tools.py`), and pure agent-facing prompt templates
+  (`prompt_templates.py`). Imports only top-level `castle_steward_engine` public exports.
 - Every agent turn completes either by submitting a validated Pydantic payload through a
   per-session MCP tool (or `ask`) verified by `check_done`, or via a check-only `check_done`
   callback that verifies live external state (such as Git commits and GitHub PRs); agent text
@@ -36,7 +39,9 @@ explicitly from `castle_steward_engine.testing`.
 
 ```bash
 stew workflows
-stew start coding --input '{"task": "...", "checkout": "/path/to/repo"}'
+stew start code-and-ship --input '{"task": "...", "checkout": "/path/to/repo"}'
+stew start code --input '{"task": "...", "checkout": "/path/to/repo"}'
+stew start ship --input '{"checkout": "/path/to/repo", "difficulty": "medium"}'
 stew run <job_id>
 stew inspect <job_id>
 stew reply <job_id> <wait_id> --value '{"approved": true}'
@@ -48,11 +53,14 @@ stew mcp --session-dir <session_dir>
 
 - **Environment defaults:** `CodingSettings` reads `STEW_ENGINE_CODING_*` environment variables
   (e.g., `STEW_ENGINE_CODING_ALLOW_UNATTENDED_MERGE`, `STEW_ENGINE_CODING_MAX_AUTO_REPAIRS`) once
-  in `resolve_setup` and checkpoints the resolved `CodingConfig` on the job.
+  in `resolve_setup` / `resolve_ship_setup` and checkpoints the resolved `CodingConfig` on the job.
+- **Standalone `ship` input:** `ShipInput` requires `checkout` and `difficulty` (`low` | `medium` |
+  `high`); `pr_number` is optional.
 - **Orchestrator:** Defaults to `antigravity` / `gemini-4-neon-high` on `CodingConfig.orchestrator`;
-  per-job `CodingInput.orchestrator` overrides `CodingConfig.orchestrator`. Runs fresh sessions for
-  `coordinate` (`submit_assessment`), `triage_repair` (`submit_repair_triage`), and each
-  `merge_gate` attempt (`submit_gate_decision`, including `escalate`).
+  per-job `CodeInput.orchestrator` / `ShipInput.orchestrator` overrides `CodingConfig.orchestrator`.
+  Runs fresh sessions for `coordinate` (`submit_assessment`), `triage_repair`
+  (`submit_repair_triage`), and each `merge_gate` attempt (`submit_gate_decision`, including
+  `escalate`).
 - **Check-only coder completion:** `implement`, `address_review`, `repair`, and `ship_pr` verify
   live Git lineage and GitHub PR state directly inside `check_done` (no `submit_commit` or
   `submit_ship` MCP tools); the `coder` role exposes only `submit_plan`, `ask`, and `check_done`.
@@ -61,10 +69,11 @@ stew mcp --session-dir <session_dir>
   mirrored read-only (`0o444`) under `CodingConfig.artifact_mirror_dir` (configurable via
   `STEW_ENGINE_CODING_ARTIFACT_MIRROR_DIR`, default `.agent-layer/cache/steward-engine`) inside
   `<checkout>/<artifact_mirror_dir>/<job_id>/` so every provider reads workspace-relative paths
-  cleanly. `resolve_setup` requires the configured mirror directory to be gitignored in the target
-  checkout (the default in Agent Layer repositories). Post-merge `cleanup` removes the job's
-  checkout mirror directory; aborted, declined, or failed runs leave their gitignored cache
-  directory in place, and canonical copies always remain in `state_dir`.
+  cleanly. `resolve_setup` / `resolve_ship_setup` requires the configured mirror directory to be
+  gitignored in the target checkout (the default in Agent Layer repositories). Post-merge `cleanup`
+  and local `code` completion (`cleanup_mirror`) remove the job's checkout mirror directory;
+  aborted, declined, or failed runs leave their gitignored cache directory in place, and canonical
+  copies always remain in `state_dir`.
 - **Deterministic routing:** `RoutingPolicy` and `AgentProfiles` in
   `castle_steward_coding/routing.py` map `(difficulty, needs_plan)` plus host availability and
   quota telemetry to a coder and distinct cross-family reviewers. `AgentLayer.quota()` parses

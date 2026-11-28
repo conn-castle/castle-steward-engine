@@ -1,4 +1,4 @@
-"""Agent-facing MCP submission tool schemas and validators for `coding`.
+"""Agent-facing MCP submission tool schemas and validators for coding workflows.
 
 Every class docstring and field `description` in this module is surfaced directly to agents
 as the MCP tool specification (`description` and JSON Schema `properties`).

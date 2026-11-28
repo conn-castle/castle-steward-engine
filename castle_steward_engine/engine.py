@@ -47,6 +47,7 @@ from castle_steward_engine.workflow import (
     CHECK_DONE_TOOL_NAME,
     END,
     AgentNode,
+    BranchEdge,
     JobInfo,
     StepNode,
     Turn,
@@ -589,7 +590,7 @@ def _compile_workflow(
         path_map = {
             key: (LG_END if target == END else target) for key, target in branch.targets.items()
         }
-        builder.add_conditional_edges(branch.src, branch.route, cast(Any, path_map))
+        builder.add_conditional_edges(branch.src, _make_branch_router(branch), cast(Any, path_map))
 
     for fo in graph.fan_outs:
         builder.add_conditional_edges(
@@ -646,6 +647,21 @@ def _make_agent_runner(
         return _validate_state_update(node.name, validators, _run_agent_node(node, state, runtime))
 
     return _run
+
+
+def _make_branch_router(branch: BranchEdge) -> Callable[[Any], str]:
+    # Engine owns the concrete workflow.state schema; avoid exposing branch.route's annotations.
+    def _route(state: Any) -> str:
+        key = branch.route(state)
+        if key not in branch.targets:
+            valid = ", ".join(sorted(branch.targets))
+            raise EngineError(
+                f"Branch on {branch.src!r} returned unknown route key {key!r} "
+                f"(valid targets: {valid})"
+            )
+        return key
+
+    return _route
 
 
 def _make_fan_out_router(

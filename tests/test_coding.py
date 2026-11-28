@@ -18,11 +18,16 @@ import pytest
 from pydantic import ValidationError
 
 from castle_steward_coding import (
-    WORKFLOW,
+    CODE_AND_SHIP_WORKFLOW,
+    CODE_WORKFLOW,
+    SHIP_WORKFLOW,
+    CodeAndShipState,
+    CodeInput,
+    CodeState,
     CodingConfig,
-    CodingInput,
     CodingSettings,
-    CodingState,
+    ShipInput,
+    ShipState,
     prompt_templates,
 )
 from castle_steward_coding.github import (
@@ -48,7 +53,9 @@ from castle_steward_coding.models import (
     ReviewItem,
     ReviewRecord,
     RunSetup,
+    ShipStateBase,
     VerifiedPr,
+    WorkflowState,
 )
 from castle_steward_coding.prompts import (
     address_review_prompt,
@@ -61,6 +68,7 @@ from castle_steward_coding.prompts import (
     review_plan_prompt,
     revise_plan_prompt,
     ship_pr_prompt,
+    task_summary,
     triage_repair_prompt,
     write_plan_prompt,
 )
@@ -78,6 +86,13 @@ _ALL_AGENTS: dict[str, AvailableAgent] = {
 }
 
 
+_WORKFLOWS = {
+    "code-and-ship": CODE_AND_SHIP_WORKFLOW,
+    "code": CODE_WORKFLOW,
+    "ship": SHIP_WORKFLOW,
+}
+
+
 def _fake_al(
     handler: Any,
     *,
@@ -85,7 +100,7 @@ def _fake_al(
     quota: QuotaSnapshot | None = None,
 ) -> FakeAgentLayer:
     return FakeAgentLayer(
-        {"coding": WORKFLOW},
+        _WORKFLOWS,
         handler,
         available_agents=_ALL_AGENTS if available_agents is None else available_agents,
         quota=quota,
@@ -162,6 +177,16 @@ def save(data):
     tmp.write_text(json.dumps(data))
     tmp.replace(sf)
 if args[:2] == ["pr", "view"]:
+    if st.get("gh_error"):
+        sys.stderr.write(f"{{st['gh_error']}}\\n")
+        sys.exit(1)
+    if len(args) > 2 and not args[2].startswith("--") and int(args[2]) != st.get("number"):
+        sys.stderr.write("pull request not found\\n")
+        sys.exit(1)
+    if st.get("no_pr"):
+        branch = st.get("headRefName", "feat/task")
+        sys.stderr.write(f'no pull requests found for branch "{{branch}}"\\n')
+        sys.exit(1)
     st["views"] = st.get("views", 0) + 1
     v = st["views"]
     if st.get("pending_views", 0) >= v:
@@ -227,6 +252,7 @@ def _base_input(
 def _sync_gh_head(gh_file: Path, sha: str, *, merge_state: str | None = None) -> None:
     st = json.loads(gh_file.read_text(encoding="utf-8"))
     st["headRefOid"] = sha
+    st.pop("no_pr", None)
     if merge_state is not None:
         st["mergeStateStatus"] = merge_state
     tmp = gh_file.with_suffix(".tmp")
@@ -245,8 +271,8 @@ def test_setup_filters_session_mcp_and_idempotent_already_merged_replay(
             "codex": AvailableAgent(agent="codex", default_model="m1", session_mcp=True),
         },
     )
-    with Engine(state_dir=tmp_path / "st", agent_layer=al, workflows={"coding": WORKFLOW}) as eng:
-        jid = eng.start("coding", _base_input(repo, orchestrator=AgentSpec(agent="legacy")))
+    with Engine(state_dir=tmp_path / "st", agent_layer=al, workflows=_WORKFLOWS) as eng:
+        jid = eng.start("code-and-ship", _base_input(repo, orchestrator=AgentSpec(agent="legacy")))
         with pytest.raises(ValueError, match="session_mcp"):
             eng.run(jid)
 
@@ -257,9 +283,9 @@ def test_setup_filters_session_mcp_and_idempotent_already_merged_replay(
     with Engine(
         state_dir=tmp_path / "st-unignored",
         agent_layer=al_unignored,
-        workflows={"coding": WORKFLOW},
+        workflows=_WORKFLOWS,
     ) as eng:
-        jid_unignored = eng.start("coding", _base_input(unignored))
+        jid_unignored = eng.start("code-and-ship", _base_input(unignored))
         with pytest.raises(ValueError, match=r"not gitignored.*\.agent-layer/cache/"):
             eng.run(jid_unignored)
     assert not (unignored / ".agent-layer").exists()
@@ -429,8 +455,8 @@ def test_plan_artifacts_validations_pending_ci_session_continuity_and_merge(
             }
         ),
     )
-    with Engine(state_dir=tmp_path / "st", agent_layer=al, workflows={"coding": WORKFLOW}) as eng:
-        jid = eng.start("coding", _base_input(repo, config={"allow_unattended_merge": True}))
+    with Engine(state_dir=tmp_path / "st", agent_layer=al, workflows=_WORKFLOWS) as eng:
+        jid = eng.start("code-and-ship", _base_input(repo, config={"allow_unattended_merge": True}))
         job_ctx["jid"] = jid
         job_ctx["artifacts_dir"] = eng.store.artifacts_dir(jid)
         st = eng.run(jid)
@@ -549,9 +575,9 @@ def test_clean_plan_and_code_reviews_skip_revise_and_address(
 
     override_orch = AgentSpec(agent="claude", model="opus", reasoning_effort="high")
     al = _fake_al(handler)
-    with Engine(state_dir=tmp_path / "st", agent_layer=al, workflows={"coding": WORKFLOW}) as eng:
+    with Engine(state_dir=tmp_path / "st", agent_layer=al, workflows=_WORKFLOWS) as eng:
         jid = eng.start(
-            "coding",
+            "code-and-ship",
             _base_input(repo, orchestrator=override_orch, config={"allow_unattended_merge": True}),
         )
         st = eng.run(jid)
@@ -639,11 +665,9 @@ def test_approval_request_human_approval_and_readiness_changed(
                 )
 
         al = _fake_al(handler)
-        with Engine(
-            state_dir=tmp_path / f"st-{name}", agent_layer=al, workflows={"coding": WORKFLOW}
-        ) as eng:
+        with Engine(state_dir=tmp_path / f"st-{name}", agent_layer=al, workflows=_WORKFLOWS) as eng:
             jid = eng.start(
-                "coding", _base_input(repo, config={"allow_unattended_merge": unattended})
+                "code-and-ship", _base_input(repo, config={"allow_unattended_merge": unattended})
             )
             st = eng.run(jid)
             if second_decision == "escalate":
@@ -815,9 +839,9 @@ def test_repair_triage_escalation_retry_and_reviewer_continuity(
             )
 
     al = _fake_al(handler)
-    with Engine(state_dir=tmp_path / "st", agent_layer=al, workflows={"coding": WORKFLOW}) as eng:
+    with Engine(state_dir=tmp_path / "st", agent_layer=al, workflows=_WORKFLOWS) as eng:
         jid = eng.start(
-            "coding",
+            "code-and-ship",
             _base_input(repo, config={"allow_unattended_merge": True, "max_auto_repairs": 2}),
         )
         st = eng.run(jid)
@@ -890,7 +914,7 @@ def test_settings_env_checkpoint_immunity_max_repairs_zero_and_bounded_readiness
     cfg = CodingSettings().to_config()
     assert type(cfg) is CodingConfig and cfg.max_auto_repairs == 0
     assert cfg.artifact_mirror_dir == Path(".custom-cache/steward")
-    inp_from_settings = CodingInput(task="Env test", checkout=repo, config=CodingSettings())
+    inp_from_settings = CodeInput(task="Env test", checkout=repo, config=CodingSettings())
     assert type(inp_from_settings.config) is CodingConfig
     assert inp_from_settings.config.max_auto_repairs == 0
 
@@ -945,9 +969,9 @@ def test_settings_env_checkpoint_immunity_max_repairs_zero_and_bounded_readiness
             )
 
     al = _fake_al(handler)
-    with Engine(state_dir=tmp_path / "st", agent_layer=al, workflows={"coding": WORKFLOW}) as eng:
+    with Engine(state_dir=tmp_path / "st", agent_layer=al, workflows=_WORKFLOWS) as eng:
         # Omit explicit `config` so resolve_setup loads CodingSettings().to_config()
-        jid = eng.start("coding", {"task": "Env test", "checkout": repo})
+        jid = eng.start("code-and-ship", {"task": "Env test", "checkout": repo})
         st = eng.run(jid)
         # max_auto_repairs=0 escalates immediately on first request_changes
         assert st.phase == "paused" and st.pending_waits[0].kind == "escalation"
@@ -1045,13 +1069,20 @@ def test_readiness_blocked_pending_transition_and_git_failure_validation(
     # verify_shipped_pr validates live GitHub PR state, draft flag, PR number, head SHA, and errors
     from castle_steward_coding import github as coding_github
 
-    base_pr = {"number": 11, "state": "OPEN", "isDraft": False, "headRefOid": sha}
+    base_pr = {
+        "number": 11,
+        "state": "OPEN",
+        "isDraft": False,
+        "headRefOid": sha,
+        "headRefName": "feat/task",
+    }
     monkeypatch.setattr(coding_github, "_view_pr", lambda _c, _n=None: base_pr)
     assert verify_shipped_pr(repo, expected_head=sha, expected_pr=11) == (11, sha)
     for override, pattern in (
         ({"isDraft": True}, "draft"),
         ({"state": "CLOSED"}, "expected OPEN"),
         ({"headRefOid": "0" * 40}, "does not match expected commit"),
+        ({"headRefName": "other-branch"}, "does not match checked-out branch"),
         ({"number": 99}, "does not match expected PR"),
     ):
         monkeypatch.setattr(
@@ -1149,9 +1180,9 @@ def test_repair_rejects_noop_after_address_review_and_stop_interrupts_ci_polling
             )
 
     al = _fake_al(handler)
-    with Engine(state_dir=tmp_path / "st", agent_layer=al, workflows={"coding": WORKFLOW}) as eng:
+    with Engine(state_dir=tmp_path / "st", agent_layer=al, workflows=_WORKFLOWS) as eng:
         jid = eng.start(
-            "coding",
+            "code-and-ship",
             {
                 "task": "Add feature",
                 "checkout": repo,
@@ -1217,8 +1248,8 @@ def test_prompts_omit_checkout_use_plan_ref_and_isolate_retry_instructions(
     )
 
     full_sha = "0123456789abcdef0123456789abcdef01234567"
-    state = CodingState(
-        input=CodingInput(task="Do task", checkout=tmp_path),
+    state = CodeAndShipState(
+        input=CodeInput(task="Do task", checkout=tmp_path),
         setup=RunSetup(config=CodingConfig(), orchestrator=spec),
         revisions=(CodeRevision(base_sha="aaa", head_sha="aaa"),),
         reviews=[
@@ -1326,8 +1357,8 @@ def test_prompts_omit_checkout_use_plan_ref_and_isolate_retry_instructions(
         ),
     )
     esc = EscalationRecord(revision=0, reason="fix bug", action="retry", instructions="retry-note")
-    st_rev0 = CodingState(
-        input=CodingInput(task="Do task", checkout=tmp_path),
+    st_rev0 = CodeAndShipState(
+        input=CodeInput(task="Do task", checkout=tmp_path),
         revisions=(CodeRevision(base_sha="b0", head_sha=full_sha),),
         pr=pr_bounced,
         escalations=[esc],
@@ -1456,8 +1487,8 @@ def test_prompts_omit_checkout_use_plan_ref_and_isolate_retry_instructions(
 def test_input_checkout_and_submission_constraints(tmp_path: Path) -> None:
     for rel in (Path("."), "relative/repo"):
         with pytest.raises(ValidationError, match="absolute path"):
-            CodingInput.model_validate({"task": "t", "checkout": rel})
-    assert CodingInput(task="t", checkout=tmp_path / "a" / "..").checkout == tmp_path.resolve()
+            CodeInput.model_validate({"task": "t", "checkout": rel})
+    assert CodeInput(task="t", checkout=tmp_path / "a" / "..").checkout == tmp_path.resolve()
     for bad_mirror in (Path("/tmp/cache"), Path("."), Path("../escape"), Path("a/../b")):
         with pytest.raises(ValidationError, match="artifact_mirror_dir"):
             CodingConfig.model_validate({"artifact_mirror_dir": bad_mirror})
@@ -1468,14 +1499,16 @@ def test_input_checkout_and_submission_constraints(tmp_path: Path) -> None:
     with pytest.raises(ValidationError):
         TaskAssessment(difficulty="low", needs_plan=False, rationale="   ")
     assert WrittenPlan.model_json_schema()["properties"]["plan"]["minLength"] == 1
-    assert set(WORKFLOW.roles) == {"orchestrator", "coder", "reviewer"}
+    assert set(CODE_AND_SHIP_WORKFLOW.roles) == {"orchestrator", "coder", "reviewer"}
     coder_tools = [
         t.name
-        for t in SessionToolHost(tmp_path / "mcp-coder-list", WORKFLOW.roles["coder"]).list_tools()
+        for t in SessionToolHost(
+            tmp_path / "mcp-coder-list", CODE_AND_SHIP_WORKFLOW.roles["coder"]
+        ).list_tools()
     ]
     assert coder_tools == ["submit_plan", "ask", "check_done"]
     submission_tools = 0
-    for role in WORKFLOW.roles.values():
+    for role in CODE_AND_SHIP_WORKFLOW.roles.values():
         host = SessionToolHost(tmp_path / f"mcp-{role.name}", role)
         for tool in host.list_tools():
             if tool.name in ("ask", "check_done"):
@@ -1490,3 +1523,256 @@ def test_input_checkout_and_submission_constraints(tmp_path: Path) -> None:
     assert submission_tools == 5
     with pytest.raises(ValueError, match="Cannot change PR number"):
         PullRequest.ship(PullRequest.ship(None, number=7, head_sha="a"), number=8, head_sha="b")
+
+
+def test_composable_state_schemas_and_input_invariants(tmp_path: Path) -> None:
+    inp = CodeInput(task="t", checkout=tmp_path)
+    for abstract_cls in (WorkflowState, ShipStateBase):
+        with pytest.raises(TypeError):
+            abstract_cls(input=inp)  # type: ignore[abstract]
+    assert set(CodeState.model_fields) == {
+        "input",
+        "setup",
+        "assignment",
+        "revisions",
+        "reviews",
+        "coordination",
+        "plans",
+    }
+    assert CodeState.model_fields["input"].annotation is CodeInput
+    assert set(ShipState.model_fields) == {
+        "input",
+        "setup",
+        "assignment",
+        "revisions",
+        "reviews",
+        "pr",
+        "escalations",
+        "retries",
+    }
+    assert ShipState.model_fields["input"].annotation is ShipInput
+    assert len(CodeAndShipState.model_fields) == 10
+    assert CodeAndShipState.model_fields["input"].annotation is CodeInput
+    with pytest.raises(ValidationError, match="task"):
+        CodeInput.model_validate({"checkout": tmp_path})
+    with pytest.raises(ValidationError, match="difficulty"):
+        ShipInput.model_validate({"checkout": tmp_path})
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        ShipInput.model_validate({"checkout": tmp_path, "difficulty": "low", "task": "extra"})
+    with pytest.raises(ValidationError):
+        ShipInput.model_validate({"checkout": tmp_path, "difficulty": "low", "pr_number": True})
+
+
+def test_code_workflow_completes_locally_and_cleans_mirror(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path, "code")
+    commits = 0
+
+    def handler(ctx: FakeTurnContext) -> None:
+        nonlocal commits
+        t, chk = ctx.active_turn.expects_tool, ctx.active_turn.expects_check
+        assert chk != "pr" and t != "submit_gate_decision"
+        if t == "submit_assessment":
+            ctx.call_tool(t, {"difficulty": "medium", "needs_plan": True, "rationale": "p"})
+        elif t == "submit_plan":
+            ctx.call_tool(t, {"plan": "# Plan\n- step\n"})
+        elif t == "submit_review":
+            ctx.call_tool(t, {"approved": True, "summary": "nit", "findings": ["f"]})
+        elif chk == "commit":
+            commits += 1
+            _commit(repo, "feat.py", f"v = {commits}\n", f"c{commits}")
+            assert not ctx.call_tool("check_done", {}).is_error
+
+    al = _fake_al(handler)
+    with Engine(state_dir=tmp_path / "st", agent_layer=al, workflows=_WORKFLOWS) as eng:
+        jid = eng.start("code", _base_input(repo))
+        st = eng.run(jid)
+        assert st.phase == "completed" and st.state is not None
+        d = cast(dict[str, Any], st.state)
+        assert "pr" not in d and "escalations" not in d and "retries" not in d
+        assert len(d["plans"]) == 2 and len(d["revisions"]) == 1
+        assert not (repo / ".agent-layer/cache/steward-engine" / str(jid)).exists()
+        assert (eng.store.artifacts_dir(jid) / "plan-v2.md").is_file()
+        assert _git(repo, "rev-parse", "HEAD") == d["revisions"][0]["head_sha"]
+        assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "feat/task"
+        assert [c.expects_tool or c.expects_check for c in al.calls if c.role == "coder"] == [
+            "submit_plan",
+            "submit_plan",
+            "commit",
+            "commit",
+        ]
+        reloaded = CodeState.model_validate(d)
+        assert reloaded.input.task == "Add feature" and len(reloaded.plans) == 2
+
+
+def test_ship_workflow_flows_resume_and_fail_fast_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _base_input(tmp_path, config={"allow_unattended_merge": True})["config"]
+    gh_base: dict[str, Any] = {
+        "state": "OPEN",
+        "headRefName": "feat/task",
+        "baseRefName": "main",
+        "checks": [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+    }
+
+    # 1. No-PR branch -> ship_pr opens PR -> pause at ask_approval -> fresh Engine resume + merge
+    r_new = _init_repo(tmp_path, "no-pr")
+    h_new = _commit(r_new, "a.py", "a = 1\n", "init")
+    gh_new = _install_fake_gh(
+        tmp_path / "gh-new",
+        monkeypatch,
+        {**gh_base, "number": 33, "url": "u/33", "headRefOid": "", "no_pr": True},
+    )
+
+    def h_open(ctx: FakeTurnContext) -> None:
+        t, chk = ctx.active_turn.expects_tool, ctx.active_turn.expects_check
+        if chk == "pr":
+            assert "existing PR" not in ctx.prompt
+            _sync_gh_head(gh_new, h_new)
+            assert not ctx.call_tool("check_done", {}).is_error
+        elif t == "submit_gate_decision":
+            ctx.call_tool(t, {"decision": "merge", "head_sha": h_new, "reason": "ok"})
+
+    st_dir = tmp_path / "st-resume"
+    al_new = _fake_al(h_open)
+    with Engine(state_dir=st_dir, agent_layer=al_new, workflows=_WORKFLOWS) as eng:
+        jid = eng.start(
+            "ship",
+            {
+                "checkout": r_new,
+                "difficulty": "low",
+                "config": {**cfg, "allow_unattended_merge": False},
+            },
+        )
+        paused = eng.run(jid)
+        assert paused.phase == "paused" and paused.pending_waits[0].kind == "merge_approval"
+        wait_id = paused.pending_waits[0].wait_id
+    with Engine(state_dir=st_dir, agent_layer=al_new, workflows=_WORKFLOWS) as eng2:
+        eng2.reply(jid, wait_id, {"approved": True})
+        done = eng2.run(jid)
+        assert done.phase == "completed" and done.state is not None
+        d1 = cast(dict[str, Any], done.state)
+        assert d1["pr"]["number"] == 33 and d1["pr"]["attempts"][0]["merge"]["status"] == "merged"
+
+    # 2. Explicit pr_number=55 on unpushed branch -> repair -> triage -> review -> coder continuity
+    r_rep = _init_repo(tmp_path, "unpushed")
+    head0 = _commit(r_rep, "auth.py", "ok = 1\n", "Add auth fix")
+    gh_rep = _install_fake_gh(
+        tmp_path / "gh-rep", monkeypatch, {**gh_base, "number": 55, "url": "u/55", "headRefOid": ""}
+    )
+    ships = gates = rep_commits = 0
+
+    def h_rep(ctx: FakeTurnContext) -> None:
+        nonlocal ships, gates, rep_commits
+        t, chk = ctx.active_turn.expects_tool, ctx.active_turn.expects_check
+        sha = _git(r_rep, "rev-parse", "HEAD")
+        assert t != "submit_assessment"
+        if chk == "pr":
+            ships += 1
+            assert "existing PR #55" in ctx.prompt
+            _sync_gh_head(gh_rep, sha)
+            assert not ctx.call_tool("check_done", {}).is_error
+        elif t == "submit_gate_decision":
+            gates += 1
+            assert prompt_templates.SHIP_DEFAULT_TASK in ctx.prompt
+            dec = "request_changes" if gates == 1 else "merge"
+            ctx.call_tool(t, {"decision": dec, "head_sha": sha, "reason": f"g{gates}"})
+        elif chk == "commit":
+            rep_commits += 1
+            _commit(r_rep, "auth.py", f"ok = {rep_commits + 1}\n", f"fix {rep_commits}")
+            assert not ctx.call_tool("check_done", {}).is_error
+        elif t == "submit_repair_triage":
+            assert f"{head0}.." in ctx.prompt
+            ctx.call_tool(t, {"needs_code_review": True, "head_sha": sha, "reason": "logic"})
+        elif t == "submit_review":
+            ctx.call_tool(t, {"approved": True, "summary": "nit", "findings": ["p"]})
+
+    al_rep = _fake_al(h_rep)
+    ship_in = {"checkout": r_rep, "difficulty": "low", "pr_number": 55, "config": cfg}
+    with Engine(state_dir=tmp_path / "st-rep", agent_layer=al_rep, workflows=_WORKFLOWS) as eng:
+        jid2 = eng.start("ship", ship_in)
+        st2 = eng.run(jid2)
+        assert st2.phase == "completed" and st2.state is not None
+        d2 = cast(dict[str, Any], st2.state)
+        a2 = d2["pr"]["attempts"]
+        assert ships == gates == rep_commits == 2 and d2["pr"]["number"] == 55
+        assert len(a2) == 2 and a2[-1]["merge"]["status"] == "merged"
+        assert not (r_rep / ".agent-layer/cache/steward-engine" / str(jid2)).exists()
+        coder = [c for c in al_rep.calls if c.role == "coder"]
+        assert len({c.handle for c in coder}) == 1
+        assert [c.is_continue for c in coder] == [False, True, True, True]
+        assert [c.expects_check for c in coder] == ["pr", "commit", "commit", "pr"]
+
+    # 3. Existing open PR at HEAD -> skips ship_pr, uses SHIP_DEFAULT_TASK
+    r_open = _init_repo(tmp_path, "open-pr")
+    h_open_sha = _commit(r_open, "w.py", "w = 1\n", "Fix widget")
+    _install_fake_gh(
+        tmp_path / "gh-open",
+        monkeypatch,
+        {**gh_base, "number": 77, "url": "u/77", "headRefOid": h_open_sha},
+    )
+
+    def h_skip(ctx: FakeTurnContext) -> None:
+        t = ctx.active_turn.expects_tool
+        assert t == "submit_gate_decision" and prompt_templates.SHIP_DEFAULT_TASK in ctx.prompt
+        ctx.call_tool(t, {"decision": "merge", "head_sha": h_open_sha, "reason": "ok"})
+
+    al_skip = _fake_al(h_skip)
+    with Engine(state_dir=tmp_path / "st-open", agent_layer=al_skip, workflows=_WORKFLOWS) as eng:
+        st3 = eng.run(
+            eng.start("ship", {"checkout": r_open, "difficulty": "medium", "config": cfg})
+        )
+        assert st3.phase == "completed" and st3.state is not None
+        d3 = cast(dict[str, Any], st3.state)
+        assert "coordination" not in d3 and "plans" not in d3
+        assert [c.role for c in al_skip.calls] == ["orchestrator"] and d3["pr"]["number"] == 77
+        assert d3["pr"]["attempts"][0]["merge"]["status"] == "merged"
+        r3 = ShipState.model_validate(d3)
+        assert r3.task_text is None and task_summary(r3) == prompt_templates.SHIP_DEFAULT_TASK
+
+    # 4. Fail-fast setup rejections (0 agent calls)
+    r_fail = _init_repo(tmp_path, "fail-fast")
+    h_fail = _commit(r_fail, "x.py", "x = 1\n", "c")
+    al_none = _fake_al(lambda _c: (_ for _ in ()).throw(AssertionError("agent must not run")))
+    cases: list[tuple[str, dict[str, Any], int | None, type[Exception], str]] = [
+        (
+            "err",
+            {**gh_base, "number": 99, "url": "u/99", "headRefOid": h_fail, "gh_error": "auth"},
+            None,
+            GitHubError,
+            "auth",
+        ),
+        (
+            "closed",
+            {**gh_base, "number": 99, "url": "u/99", "headRefOid": h_fail, "state": "CLOSED"},
+            99,
+            ValueError,
+            "expected OPEN",
+        ),
+        (
+            "branch",
+            {**gh_base, "number": 99, "url": "u/99", "headRefOid": h_fail, "headRefName": "other"},
+            99,
+            ValueError,
+            "branch",
+        ),
+    ]
+    for name, gh_st, pr_num, exc_cls, pat in cases:
+        _install_fake_gh(tmp_path / f"gh-{name}", monkeypatch, gh_st)
+        raw: dict[str, Any] = {"checkout": r_fail, "difficulty": "low", "config": cfg}
+        if pr_num is not None:
+            raw["pr_number"] = pr_num
+        with (
+            Engine(
+                state_dir=tmp_path / f"st-{name}", agent_layer=al_none, workflows=_WORKFLOWS
+            ) as eng,
+            pytest.raises(exc_cls, match=pat),
+        ):
+            eng.run(eng.start("ship", raw))
+    _git(r_fail, "checkout", "--detach", "HEAD")
+    with (
+        Engine(state_dir=tmp_path / "st-detach", agent_layer=al_none, workflows=_WORKFLOWS) as eng,
+        pytest.raises(ValueError, match="detached HEAD"),
+    ):
+        eng.run(eng.start("ship", {"checkout": r_fail, "difficulty": "low", "config": cfg}))
+    assert al_none.calls == []

@@ -1,4 +1,4 @@
-"""Pure deterministic coder and cross-family reviewer routing for `coding`."""
+"""Pure deterministic coder and cross-family reviewer routing for coding workflows."""
 
 from __future__ import annotations
 

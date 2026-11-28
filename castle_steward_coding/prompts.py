@@ -7,7 +7,13 @@ import textwrap
 from typing import Any
 
 from castle_steward_coding import prompt_templates as tpl
-from castle_steward_coding.models import CodingState, PullRequest, ReviewItem
+from castle_steward_coding.models import (
+    CodeState,
+    PullRequest,
+    ReviewItem,
+    ShipStateBase,
+    WorkflowState,
+)
 
 _STANDALONE_FIELD_RE = re.compile(r"\{(\w+)\}")
 
@@ -28,7 +34,7 @@ def _render(template: str, **fields: Any) -> str:
     return cleaned_template.format(**fields)
 
 
-def _format_reviews(state: CodingState, *, stage: str, revision: int | None = None) -> str:
+def _format_reviews(state: WorkflowState, *, stage: str, revision: int | None = None) -> str:
     items = [
         r
         for r in state.reviews
@@ -63,7 +69,7 @@ def _format_reviews(state: CodingState, *, stage: str, revision: int | None = No
     return "\n".join(lines)
 
 
-def _latest_code_review_revision(state: CodingState) -> int | None:
+def _latest_code_review_revision(state: WorkflowState) -> int | None:
     code_revs = [r.revision for r in state.reviews if r.stage == "code"]
     if not code_revs:
         return None
@@ -71,7 +77,7 @@ def _latest_code_review_revision(state: CodingState) -> int | None:
 
 
 def _format_review_context_note(
-    state: CodingState, pr_head_sha: str, reviewed_revision: int | None
+    state: WorkflowState, pr_head_sha: str, reviewed_revision: int | None
 ) -> str:
     rev = state.current_revision
     if rev is not None and rev.triage is not None and not rev.triage.needs_code_review:
@@ -122,7 +128,7 @@ def _render_pr_section(pr: PullRequest, pr_head_sha: str) -> str:
     )
 
 
-def _render_escalations_section(state: CodingState) -> str:
+def _render_escalations_section(state: ShipStateBase) -> str:
     if not state.escalations:
         return ""
     entries: list[str] = []
@@ -166,7 +172,7 @@ def _render_prior_verdicts_section(pr: PullRequest) -> str:
     )
 
 
-def _render_reviews_section(state: CodingState, pr_head_sha: str) -> str:
+def _render_reviews_section(state: WorkflowState, pr_head_sha: str) -> str:
     reviewed_rev = _latest_code_review_revision(state)
     heading = (
         tpl.MERGE_CONTEXT_REVIEWS_HEADING_PRIOR_REV
@@ -186,7 +192,7 @@ def _render_reviews_section(state: CodingState, pr_head_sha: str) -> str:
     )
 
 
-def render_merge_gate_context(state: CodingState, pr: PullRequest) -> str:
+def render_merge_gate_context(state: ShipStateBase, pr: PullRequest) -> str:
     """Render the per-attempt Markdown context artifact read by `merge_gate`."""
     readiness = pr.current.readiness
     pr_head_sha = readiness.head_sha if readiness else pr.current.head_sha
@@ -205,11 +211,15 @@ def _format_human_instructions(raw: str) -> str:
     return tpl.HUMAN_INSTRUCTIONS_SECTION.format(instructions=cleaned) if cleaned else ""
 
 
-def coordinate_prompt(state: CodingState) -> str:
+def task_summary(state: WorkflowState) -> str:
+    return state.task_text or tpl.SHIP_DEFAULT_TASK
+
+
+def coordinate_prompt(state: CodeState) -> str:
     return _render(tpl.COORDINATE, task=state.input.task)
 
 
-def write_plan_prompt(state: CodingState) -> str:
+def write_plan_prompt(state: CodeState) -> str:
     return _render(tpl.WRITE_PLAN, task=state.input.task)
 
 
@@ -222,7 +232,7 @@ def review_plan_prompt(item: ReviewItem) -> str:
     )
 
 
-def revise_plan_prompt(state: CodingState) -> str:
+def revise_plan_prompt(state: CodeState) -> str:
     plan = state.latest_plan
     assert plan is not None and plan.ref is not None
     return _render(
@@ -232,7 +242,7 @@ def revise_plan_prompt(state: CodingState) -> str:
     )
 
 
-def implement_prompt(state: CodingState) -> str:
+def implement_prompt(state: CodeState) -> str:
     plan_ref = state.latest_plan.ref if state.latest_plan else None
     if plan_ref:
         return _render(
@@ -269,7 +279,7 @@ def review_code_prompt(item: ReviewItem) -> str:
     )
 
 
-def address_review_prompt(state: CodingState) -> str:
+def address_review_prompt(state: WorkflowState) -> str:
     return _render(
         tpl.ADDRESS_REVIEW,
         head=state.head,
@@ -277,8 +287,15 @@ def address_review_prompt(state: CodingState) -> str:
     )
 
 
-def ship_pr_prompt(state: CodingState) -> str:
+def ship_pr_prompt(state: ShipStateBase) -> str:
     if state.pr is None:
+        if state.initial_pr_number is not None:
+            return _render(
+                tpl.SHIP_PR_UPDATE,
+                head=state.head,
+                pr_number=state.initial_pr_number,
+                readiness_note="",
+            )
         return _render(tpl.SHIP_PR_INITIAL, head=state.head)
     readiness_note = ""
     if (
@@ -295,7 +312,7 @@ def ship_pr_prompt(state: CodingState) -> str:
     )
 
 
-def merge_gate_prompt(state: CodingState) -> str:
+def merge_gate_prompt(state: ShipStateBase) -> str:
     assert state.pr is not None and state.pr.current.context_ref is not None
     attempt = state.pr.current
     pr_head_sha = attempt.readiness.head_sha if attempt.readiness else attempt.head_sha
@@ -303,12 +320,12 @@ def merge_gate_prompt(state: CodingState) -> str:
         tpl.MERGE_GATE,
         pr_number=state.pr.number,
         pr_head_sha=pr_head_sha,
-        task=state.input.task,
+        task=task_summary(state),
         context_ref=attempt.context_ref,
     )
 
 
-def format_repair_reason(state: CodingState, *, default: str = "") -> str:
+def format_repair_reason(state: ShipStateBase, *, default: str = "") -> str:
     cause = state.repair_cause()
     if cause is None:
         return default
@@ -320,11 +337,11 @@ def format_repair_reason(state: CodingState, *, default: str = "") -> str:
     return joined or default
 
 
-def escalation_reason(state: CodingState) -> str:
+def escalation_reason(state: ShipStateBase) -> str:
     return format_repair_reason(state, default=tpl.DEFAULT_ESCALATION_REASON)
 
 
-def repair_prompt(state: CodingState) -> str:
+def repair_prompt(state: ShipStateBase) -> str:
     assert state.pr is not None
     return _render(
         tpl.REPAIR,
@@ -335,11 +352,11 @@ def repair_prompt(state: CodingState) -> str:
     )
 
 
-def triage_repair_prompt(state: CodingState) -> str:
+def triage_repair_prompt(state: ShipStateBase) -> str:
     return _render(
         tpl.TRIAGE_REPAIR,
         diff_range=f"{state.diff_base}..{state.head}",
-        task=state.input.task,
+        task=task_summary(state),
         reason=format_repair_reason(state, default=tpl.EMPTY_REASON),
         human_instructions=_format_human_instructions(state.triage_instructions()),
         head=state.head,

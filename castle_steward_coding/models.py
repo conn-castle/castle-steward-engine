@@ -1,11 +1,12 @@
-"""Internal config, input, durable state, and human wait-reply models for `coding`."""
+"""Internal config, input, durable state, and human wait-reply models for coding workflows."""
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from castle_steward_coding.github import MergeMethod, MergeResult, PrReadiness
@@ -57,8 +58,8 @@ class CodingConfig(BaseModel):
 class CodingSettings(BaseSettings, CodingConfig):
     """Environment-backed loader (`STEW_ENGINE_CODING_*`) for default `CodingConfig`.
 
-    Never stored in `CodingInput` or `CodingState`; call `to_config()` once in
-    `resolve_setup` so resumed jobs keep their checkpointed configuration.
+    Never stored in workflow input or state; call `to_config()` once in
+    setup so resumed jobs keep their checkpointed configuration.
     """
 
     model_config = SettingsConfigDict(env_prefix="STEW_ENGINE_CODING_", extra="forbid", frozen=True)
@@ -68,12 +69,9 @@ class CodingSettings(BaseSettings, CodingConfig):
         return CodingConfig.model_validate(self.model_dump())
 
 
-class CodingInput(BaseModel):
-    """Validated input accepted when starting a `coding` job."""
-
+class _WorkflowInput(BaseModel):
     model_config = _STATE_MODEL_CONFIG
 
-    task: str
     checkout: Path
     orchestrator: AgentSpec | None = None
     config: CodingConfig | None = None
@@ -84,6 +82,19 @@ class CodingInput(BaseModel):
         if not value.is_absolute():
             raise ValueError(f"checkout must be an absolute path, got {str(value)!r}")
         return value.resolve()
+
+
+class CodeInput(_WorkflowInput):
+    """Validated input accepted when starting a `code` or `code-and-ship` job."""
+
+    task: _NonBlankStr
+
+
+class ShipInput(_WorkflowInput):
+    """Validated input accepted when starting a `ship` job."""
+
+    difficulty: Difficulty
+    pr_number: StrictInt | None = Field(default=None, gt=0)
 
 
 # --- State & domain records ---
@@ -254,28 +265,27 @@ class VerifiedPr(BaseModel):
     head_sha: _NonBlankStr
 
 
-class CodingState(BaseModel):
-    """Durable checkpoint state for `coding` (10 top-level LangGraph channels)."""
+class WorkflowState(BaseModel, ABC):
+    """Shared durable checkpoint core for `code`, `ship`, and `code-and-ship` workflows."""
 
     model_config = _STATE_MODEL_CONFIG
 
-    # --- Setup (written once) ---
-    input: CodingInput  # Validated job request (engine-required)
+    # --- Setup & assignment (each written once) ---
+    input: _WorkflowInput  # Validated job request (engine-required)
     setup: RunSetup | None = None  # Resolved config and orchestrator agent
-
-    # --- Coordination & assignment (each written once) ---
-    coordination: TaskClassification | None = None  # Task difficulty, needs_plan, and rationale
     assignment: Assignment | None = None  # Deterministic coder and reviewer assignments
 
-    # --- Append-only domain records (no `latest_*` overwrite loss) ---
-    plans: tuple[PlanVersion, ...] = ()  # Plan versions (v1, v2); len(plans) is current version
+    # --- Append-only revision & review records ---
     revisions: tuple[CodeRevision, ...] = ()  # Git revisions (base..head + optional triage)
     reviews: AppendList[ReviewRecord] = Field(default_factory=list)  # Parallel plan & code reviews
-    pr: PullRequest | None = None  # PR number + chronological shipment attempts
-    escalations: AppendList[EscalationRecord] = Field(default_factory=list)  # Human escalations
 
-    # --- Retry budgets (reset to 0 on human escalation retry) ---
-    retries: RetryCounters = Field(default_factory=RetryCounters)  # Auto-repair & readiness counts
+    @property
+    @abstractmethod
+    def task_text(self) -> str | None: ...
+
+    @property
+    def latest_plan(self) -> PlanVersion | None:
+        return None
 
     @property
     def head(self) -> str | None:
@@ -293,13 +303,51 @@ class CodingState(BaseModel):
     def revision(self) -> int:
         return max(0, len(self.revisions) - 1)
 
+    def coder_agent(self) -> AgentSpec:
+        assert self.assignment is not None
+        return self.assignment.coder
+
+    def reviews_clean(self, stage: Literal["plan", "code"], *, head_sha: str | None = None) -> bool:
+        assert self.assignment is not None
+        reviewers = {r.profile for r in self.assignment.reviewers}
+        if not reviewers or (stage == "code" and head_sha is None):
+            return False
+        latest = {
+            r.reviewer: r
+            for r in self.reviews
+            if r.stage == stage and (head_sha is None or r.head_sha == head_sha)
+        }
+        return reviewers.issubset(latest) and all(
+            latest[name].approved and not latest[name].findings for name in reviewers
+        )
+
+
+class CodeState(WorkflowState):
+    """Durable checkpoint state for `code`."""
+
+    input: CodeInput
+    coordination: TaskClassification | None = None  # Task difficulty, needs_plan, and rationale
+    plans: tuple[PlanVersion, ...] = ()  # Plan versions (v1, v2); len(plans) is current version
+
+    @property
+    def task_text(self) -> str:
+        return self.input.task
+
     @property
     def latest_plan(self) -> PlanVersion | None:
         return self.plans[-1] if self.plans else None
 
-    def coder_agent(self) -> AgentSpec:
-        assert self.assignment is not None
-        return self.assignment.coder
+
+class ShipStateBase(WorkflowState):
+    """Shared PR, escalation, and retry channels for `ship` and `code-and-ship`."""
+
+    pr: PullRequest | None = None  # PR number + chronological shipment attempts
+    escalations: AppendList[EscalationRecord] = Field(default_factory=list)  # Human escalations
+    retries: RetryCounters = Field(default_factory=RetryCounters)  # Auto-repair & readiness counts
+
+    @property
+    def initial_pr_number(self) -> int | None:
+        return None
 
     def repair_cause(self) -> RepairCause | None:
         if self.pr is None:
@@ -332,19 +380,26 @@ class CodingState(BaseModel):
     def triage_instructions(self) -> str:
         return self._retry_instructions(for_revision=self.revision - 1)
 
-    def reviews_clean(self, stage: Literal["plan", "code"], *, head_sha: str | None = None) -> bool:
-        assert self.assignment is not None
-        reviewers = {r.profile for r in self.assignment.reviewers}
-        if not reviewers or (stage == "code" and head_sha is None):
-            return False
-        latest = {
-            r.reviewer: r
-            for r in self.reviews
-            if r.stage == stage and (head_sha is None or r.head_sha == head_sha)
-        }
-        return reviewers.issubset(latest) and all(
-            latest[name].approved and not latest[name].findings for name in reviewers
-        )
+
+class ShipState(ShipStateBase):
+    """Durable checkpoint state for `ship`."""
+
+    input: ShipInput
+
+    @property
+    def task_text(self) -> None:
+        return None
+
+    @property
+    def initial_pr_number(self) -> int | None:
+        return self.input.pr_number
+
+
+class CodeAndShipState(CodeState, ShipStateBase):
+    """Durable checkpoint state for `code-and-ship`."""
+
+    # Pin `input` explicitly so base-class MRO order never alters the input schema.
+    input: CodeInput
 
 
 class ReviewItem(BaseModel):

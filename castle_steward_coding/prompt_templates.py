@@ -1,4 +1,4 @@
-"""Pure agent-facing prompt templates and text snippets for `coding`.
+"""Pure agent-facing prompt templates and text snippets for coding workflows.
 
 This module contains only string constants (no functions, imports, or control flow) so all
 agent-facing prose can be reviewed in one place.
@@ -22,6 +22,8 @@ CODE_REVIEW_FOCUS = (
     "- missing behavioral tests for key paths and failures, or tautological tests that would pass despite a realistic defect"
 )
 
+
+SHIP_DEFAULT_TASK = "Ship the existing branch; judge the PR on its description and diff."
 
 # --- Full prompt templates ---
 

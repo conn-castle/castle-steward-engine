@@ -21,7 +21,11 @@ def test_cli_workflows_settings_start_inspect_and_stop(
 ) -> None:
     assert main(["workflows"]) == 0
     wfs = json.loads(capsys.readouterr().out)
-    assert any(item["name"] == "coding" and item["version"] == "2.0.0" for item in wfs)
+    assert {(item["name"], item["version"]) for item in wfs} >= {
+        ("code-and-ship", "2.0.0"),
+        ("code", "2.0.0"),
+        ("ship", "2.0.0"),
+    }
 
     env_state = tmp_path / "env-state"
     cli_state = tmp_path / "cli-state"
@@ -34,7 +38,7 @@ def test_cli_workflows_settings_start_inspect_and_stop(
 
     inp = json.dumps({"task": "demo", "checkout": str(tmp_path)})
     # Uses STEW_ENGINE_STATE_DIR when --state-dir is omitted
-    assert main(["start", "coding", "--input", inp]) == 0
+    assert main(["start", "code-and-ship", "--input", inp]) == 0
     job_id = json.loads(capsys.readouterr().out)["job_id"]
     assert (env_state / "engine.db").is_file()
 
@@ -47,11 +51,14 @@ def test_cli_workflows_settings_start_inspect_and_stop(
     assert json.loads(capsys.readouterr().out)["phase"] == "stopped"
 
     # Explicit --state-dir overrides STEW_ENGINE_STATE_DIR
-    assert main(["--state-dir", str(cli_state), "start", "coding", "--input", inp]) == 0
+    assert main(["--state-dir", str(cli_state), "start", "code-and-ship", "--input", inp]) == 0
     capsys.readouterr()
     assert (cli_state / "engine.db").is_file()
 
-    for cmd, flag in ((["start", "coding"], "--input"), (["reply", job_id, "w"], "--value")):
+    for cmd, flag in (
+        (["start", "code-and-ship"], "--input"),
+        (["reply", job_id, "w"], "--value"),
+    ):
         for extra in ([], [flag, "{}", f"{flag}-file", "f"]):
             with pytest.raises(SystemExit) as exc:
                 main([*cmd, *extra])
@@ -60,7 +67,7 @@ def test_cli_workflows_settings_start_inspect_and_stop(
 
 def test_real_stdio_mcp_server_smoke(tmp_path: Path) -> None:
     session = SessionDir(tmp_path / "session")
-    session.init(workflow="coding", role="coder")
+    session.init(workflow="code-and-ship", role="coder")
     session.prepare_turn(
         turn_key="t1:0",
         attempt=1,

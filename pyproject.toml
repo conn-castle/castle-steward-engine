@@ -23,7 +23,9 @@ dependencies = [
 stew = "castle_steward_engine.cli:main"
 
 [project.entry-points."castle_steward_engine.workflows"]
-coding = "castle_steward_coding:WORKFLOW"
+code-and-ship = "castle_steward_coding:CODE_AND_SHIP_WORKFLOW"
+code = "castle_steward_coding:CODE_WORKFLOW"
+ship = "castle_steward_coding:SHIP_WORKFLOW"
 
 [dependency-groups]
 # Pin dev tools so local checks and CI use the same versions.
