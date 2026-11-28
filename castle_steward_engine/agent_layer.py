@@ -4,15 +4,26 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Protocol
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+)
 
-from castle_steward_engine.workflow import AgentSpec, AvailableAgent, QuotaSnapshot
+from castle_steward_engine.workflow import AgentSpec, AvailableAgent, QuotaReading, QuotaSnapshot
 
 DEFAULT_AGENT_LAYER_EXECUTABLE = "al"
+DEFAULT_DISPATCH_MAX_DEPTH = 1
 ALREADY_STARTED_EXIT_CODE = 82
+EXIT_QUOTA_PARTIAL = 84
+EXIT_QUOTA_NONE = 85
 _NO_PROVIDER_CONVERSATION_PATTERNS = (
     "no provider conversation",
     "no conversation to continue",
@@ -98,9 +109,122 @@ class AgentLayerClient(Protocol):
     def inspect(self, workdir: Path, invocation_id: str) -> DispatchResult: ...
 
 
+class _WireModel(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+
+class _QuotaWindow(_WireModel):
+    used_percent: float | int | None = Field(default=None, ge=0.0, allow_inf_nan=False)
+    duration_seconds: int | None = Field(default=None, ge=0)
+    starts_at: AwareDatetime | None = None
+    resets_at: AwareDatetime | None = None
+    state: str = ""
+    disabled: bool | None = None
+
+
+class _QuotaPool(_WireModel):
+    id: str = ""
+    scope: str = ""
+    windows: list[_QuotaWindow] | None = None
+
+
+class _QuotaModel(_WireModel):
+    id: _NonBlankStr
+    pools: list[str] | None = None
+    blocked: bool | None = None
+
+
+class _QuotaResult(_WireModel):
+    agent: _NonBlankStr
+    status: _NonBlankStr
+    attempted_at: AwareDatetime | None = None
+    observed_at: AwareDatetime | None = None
+    blocked: bool | None = None
+    pools: list[_QuotaPool] | None = None
+    models: list[_QuotaModel] | None = None
+
+
+class _QuotaResponse(_WireModel):
+    schema_version: int = Field(ge=1, le=1)
+    results: list[_QuotaResult]
+
+
 def _looks_like_no_provider_conversation(text: str) -> bool:
     lower = text.lower()
     return any(needle in lower for needle in _NO_PROVIDER_CONVERSATION_PATTERNS)
+
+
+def _window_pace(w: _QuotaWindow, now: datetime | None) -> float | None:
+    if w.used_percent is None or w.duration_seconds is None or w.duration_seconds <= 0:
+        return None
+    if w.state == "rolling":
+        return w.used_percent / 100.0
+    if w.state != "fixed":
+        return None
+    elapsed: float | None = None
+    if now is not None:
+        if w.starts_at is not None:
+            elapsed = (now - w.starts_at).total_seconds()
+        elif w.resets_at is not None:
+            elapsed = w.duration_seconds - (w.resets_at - now).total_seconds()
+    if elapsed is not None and elapsed <= 0.0:
+        return None
+    if w.used_percent == 0.0:
+        return 0.0
+    if elapsed is None:
+        return None
+    return (w.used_percent / 100.0) / max(1 / 7, min(1.0, elapsed / w.duration_seconds))
+
+
+def _pool_pace(pool: _QuotaPool, now: datetime | None) -> float | None:
+    active = [
+        (w.duration_seconds, _window_pace(w, now))
+        for w in (pool.windows or [])
+        if w.disabled is not True
+        and w.state != "not_started"
+        and w.used_percent is not None
+        and w.duration_seconds is not None
+        and w.duration_seconds > 0
+    ]
+    eligible = [c for c in active if c[0] >= 86_400] or active
+    if not eligible:
+        return None
+    return max(
+        eligible, key=lambda c: (c[0], c[1] is not None, c[1] if c[1] is not None else -1.0)
+    )[1]
+
+
+def _to_quota_snapshot(response: _QuotaResponse) -> QuotaSnapshot:
+    by_agent: dict[str, QuotaReading] = {}
+    by_model: dict[str, dict[str, QuotaReading]] = {}
+    for res in response.results:
+        obs = res.observed_at.isoformat() if res.observed_at is not None else None
+        if res.status != "ok":
+            if res.blocked is True:
+                by_agent[res.agent] = QuotaReading(blocked=True, observed_at=obs)
+            continue
+        now = res.observed_at or res.attempted_at
+        pools = [p for p in (res.pools or []) if p.scope != "other_surface"]
+        paces = [(p, _pool_pace(p, now)) for p in pools]
+        by_id = {p.id: pace for p, pace in paces if p.id and pace is not None}
+        all_paces = [pace for p, pace in paces if p.scope == "all" and pace is not None]
+        agent_blocked = bool(res.blocked)
+        by_agent[res.agent] = QuotaReading(
+            blocked=agent_blocked,
+            pace_ratio=max(all_paces) if all_paces else None,
+            observed_at=obs,
+        )
+        models: dict[str, QuotaReading] = {}
+        for m in res.models or []:
+            m_paces = [by_id[pid] for pid in (m.pools or []) if pid in by_id]
+            models[m.id] = QuotaReading(
+                blocked=m.blocked if m.blocked is not None else agent_blocked,
+                pace_ratio=max(m_paces) if m_paces else None,
+                observed_at=obs,
+            )
+        if models:
+            by_model[res.agent] = models
+    return QuotaSnapshot(by_agent=by_agent, by_model=by_model)
 
 
 class AgentLayer:
@@ -163,9 +287,22 @@ class AgentLayer:
         return result
 
     def quota(self, workdir: Path | None = None) -> QuotaSnapshot:
-        """Return quota telemetry once conn-castle/agent-layer#575 ships; empty until then."""
-        _ = workdir
-        return QuotaSnapshot()
+        """Parse `al -q dispatch quota` JSON telemetry into a `QuotaSnapshot`."""
+        proc = self._run(
+            ["quota"],
+            workdir=workdir,
+            allow_exit_codes=(EXIT_QUOTA_PARTIAL, EXIT_QUOTA_NONE),
+        )
+        try:
+            response = _QuotaResponse.model_validate_json(proc.stdout)
+        except ValidationError as exc:
+            raise AgentLayerError(
+                f"Invalid al dispatch quota payload: {exc}",
+                returncode=proc.returncode,
+                stdout=proc.stdout,
+                stderr=proc.stderr,
+            ) from exc
+        return _to_quota_snapshot(response)
 
     def reserve_start(self, workdir: Path) -> DispatchResult:
         return DispatchResult.model_validate_json(self._run(["reserve"], workdir=workdir).stdout)
@@ -193,6 +330,8 @@ class AgentLayer:
             str(mcp_config),
             "--role",
             role,
+            "--max-depth",
+            str(DEFAULT_DISPATCH_MAX_DEPTH),
         ]
         if agent.model:
             args.extend(["--model", agent.model])

@@ -135,12 +135,15 @@ class SessionDir:
         (self.path / _TURNS_DIRNAME).mkdir(exist_ok=True)
         meta = SessionMeta(workflow=workflow, role=role)
         atomic_write_text(self.meta_path, meta.model_dump_json(indent=2))
+        mcp_env = {"PATH": os.environ.get("PATH", "")}
+        if pythonpath := os.environ.get("PYTHONPATH"):
+            mcp_env["PYTHONPATH"] = pythonpath
         mcp_config = {
             "mcpServers": {
                 _MCP_SERVER_NAME: {
                     "command": sys.executable,
                     "args": ["-m", "castle_steward_engine", "mcp", "--session-dir", str(self.path)],
-                    "env": {"PATH": os.environ.get("PATH", "")},
+                    "env": mcp_env,
                 }
             }
         }

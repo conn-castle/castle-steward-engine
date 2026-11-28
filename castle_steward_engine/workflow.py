@@ -70,7 +70,13 @@ class QuotaSnapshot(BaseModel):
     by_model: dict[str, dict[str, QuotaReading]] = Field(default_factory=dict)
 
     def for_spec(self, spec: AgentSpec) -> QuotaReading:
-        """Return merged model-pool and agent-level quota reading for `spec`."""
+        """Return quota reading for `spec`.
+
+        Model-specific entries in `by_model` are authoritative for `blocked` (e.g., a model
+        covered by credits while the included pool is exhausted stays unblocked), while unlisted
+        models inherit `by_agent`. `pace_ratio` and `observed_at` fall back to `by_agent` when
+        omitted on the model entry.
+        """
         agent_reading = self.by_agent.get(spec.agent)
         model_reading = (
             models.get(spec.model)
@@ -82,7 +88,7 @@ class QuotaSnapshot(BaseModel):
         if agent_reading is None:
             return model_reading
         return QuotaReading(
-            blocked=model_reading.blocked or agent_reading.blocked,
+            blocked=model_reading.blocked,
             pace_ratio=(
                 model_reading.pace_ratio
                 if model_reading.pace_ratio is not None

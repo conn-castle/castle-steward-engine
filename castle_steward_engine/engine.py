@@ -372,8 +372,9 @@ def _wait_and_finalize(
     )
     store.update_turn_status(turn.job_id, turn.turn_key, turn.attempt, final_status, completed=True)
     if final_status != "completed":
+        detail = f": {outcome.error}" if outcome.error else ""
         raise TurnFailed(
-            f"Turn {turn.turn_key} on node {node_name!r} ended with status {final_status!r}"
+            f"Turn {turn.turn_key} on node {node_name!r} ended with status {final_status!r}{detail}"
         )
     return turn.prompt_file.parent
 

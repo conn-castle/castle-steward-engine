@@ -67,17 +67,21 @@ stew mcp --session-dir <session_dir>
   directory in place, and canonical copies always remain in `state_dir`.
 - **Deterministic routing:** `RoutingPolicy` and `AgentProfiles` in
   `castle_steward_coding/routing.py` map `(difficulty, needs_plan)` plus host availability and
-  quota telemetry to a coder and distinct cross-family reviewers. Until `conn-castle/agent-layer#575`
-  ships, `AgentLayer.quota()` returns an empty `QuotaSnapshot`, so burn-rate pace thresholds stay
-  inactive and reviewer pairs pick randomly.
+  quota telemetry to a coder and distinct cross-family reviewers. `AgentLayer.quota()` parses
+  `al -q dispatch quota` (`conn-castle/agent-layer#575`) into `QuotaSnapshot` for burn-rate pace
+  thresholds and lowest-pace reviewer selection; `AgentLayer.start()` caps dispatched sessions at
+  `--max-depth 1` (`#576`). These features are merged on `conn-castle/agent-layer` `main` and will
+  ship in the next `agent-layer` release (expected `v1.5.0`).
 
 ## Forthcoming Agent Layer Dependencies
 
-Live execution depends on four upcoming Agent Layer features:
+Live execution relies on five features merged on `conn-castle/agent-layer` `main` that will ship in
+the next `agent-layer` release (expected `v1.5.0`):
 - **#563** — Session-scoped MCP configuration passed on `al dispatch start` and reported in `al dispatch options`.
 - **#564** — Continuation reservations (`al dispatch reserve --continue` / `al dispatch continue --reservation`).
 - **#575** — Quota and burn-rate telemetry consumed via `AgentLayer.quota()` / `JobInfo.agent_quota()` for deterministic routing.
-- **#576** — Disabling nested `al dispatch` inside dispatched workflow agent turns.
+- **#576** — Per-conversation dispatch depth cap (`--max-depth 1` on `al dispatch start`) preventing nested `al dispatch` inside dispatched workflow agent turns.
+- **#579** — Protocol-agnostic session MCP handshake and raw stdio passthrough.
 
 ## Development
 

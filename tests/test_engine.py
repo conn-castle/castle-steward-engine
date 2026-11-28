@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from castle_steward_engine import (
     END,
     AgentLayer,
+    AgentLayerError,
     AgentSpec,
     AppendList,
     Engine,
@@ -37,6 +38,8 @@ from castle_steward_engine import (
     Workflow,
     WorkflowVersionMismatchError,
 )
+from castle_steward_engine.agent_layer import EXIT_QUOTA_NONE, EXIT_QUOTA_PARTIAL
+from castle_steward_engine.mcp_server import SessionDir
 from castle_steward_engine.store import METADATA, Store, TurnRecord, include_name
 from castle_steward_engine.testing import (
     FakeAgentLayer,
@@ -46,6 +49,11 @@ from castle_steward_engine.testing import (
 )
 
 SPEC = AgentSpec(agent="codex", model="gpt-test")
+QUOTA_NOW = "2026-11-27T12:00:00Z"
+QUOTA_WEEK_START = "2026-11-24T00:00:00Z"  # 3.5 days (50%) elapsed at QUOTA_NOW
+QUOTA_WEEK_RESET = "2026-12-01T00:00:00Z"
+QUOTA_WEEK_SECONDS = 604800
+QUOTA_SHORT_SECONDS = 18000
 
 
 class DemoInput(BaseModel):
@@ -353,7 +361,6 @@ def test_real_agent_layer_cli_contract(tmp_path: Path, monkeypatch: pytest.Monke
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     al = AgentLayer("al")
-    assert al.quota(tmp_path) == QuotaSnapshot()
     snap = QuotaSnapshot(
         by_agent={"claude": QuotaReading(pace_ratio=0.7, observed_at="2026-11-26T00:00:00Z")},
         by_model={"claude": {"fable": QuotaReading(blocked=True, pace_ratio=0.2)}},
@@ -363,7 +370,8 @@ def test_real_agent_layer_cli_contract(tmp_path: Path, monkeypatch: pytest.Monke
     )
     assert snap.for_spec(AgentSpec(agent="claude", model="opus")).pace_ratio == 0.7
     assert snap.for_spec(AgentSpec(agent="codex")) == QuotaReading()
-    # Model-level unblocked reading never shadows a provider-wide block
+    # Model-level blocked is authoritative (e.g., credit-bypass model stays unblocked);
+    # unlisted models still inherit by_agent.blocked.
     provider_blocked = QuotaSnapshot(
         by_agent={
             "claude": QuotaReading(blocked=True, pace_ratio=0.9, observed_at="2026-11-26T01:00:00Z")
@@ -376,9 +384,12 @@ def test_real_agent_layer_cli_contract(tmp_path: Path, monkeypatch: pytest.Monke
         },
     )
     assert provider_blocked.for_spec(AgentSpec(agent="claude", model="fable")) == QuotaReading(
-        blocked=True, pace_ratio=0.1, observed_at="2026-11-26T01:00:00Z"
+        blocked=False, pace_ratio=0.1, observed_at="2026-11-26T01:00:00Z"
     )
     assert provider_blocked.for_spec(AgentSpec(agent="claude", model="opus")) == QuotaReading(
+        blocked=False, pace_ratio=0.9, observed_at="2026-11-26T01:00:00Z"
+    )
+    assert provider_blocked.for_spec(AgentSpec(agent="claude", model="sonnet")) == QuotaReading(
         blocked=True, pace_ratio=0.9, observed_at="2026-11-26T01:00:00Z"
     )
     with pytest.raises(ValidationError):
@@ -396,6 +407,10 @@ def test_real_agent_layer_cli_contract(tmp_path: Path, monkeypatch: pytest.Monke
         mcp_config=tmp_path / "m.json",
         role="lead",
     )
+    start_cmd = calls[-2]
+    assert start_cmd[:4] == ["al", "-q", "dispatch", "start"]
+    max_depth_idx = start_cmd.index("--max-depth")
+    assert start_cmd[max_depth_idx : max_depth_idx + 2] == ["--max-depth", "1"]
     assert started.invocation_id == "inv1" and calls[-1][-2:] == ["inspect", "inv1"]
     cres = al.reserve_continue(tmp_path, "h1")
     cont = al.continue_session(
@@ -407,6 +422,154 @@ def test_real_agent_layer_cli_contract(tmp_path: Path, monkeypatch: pytest.Monke
     with pytest.raises(ValidationError):
         al.inspect(tmp_path, "inv2")
     assert not responses
+
+
+def _win(used: Any, dur: int = QUOTA_WEEK_SECONDS, **kw: Any) -> dict[str, Any]:
+    return {"used_percent": used, "duration_seconds": dur, "state": "fixed", **kw}
+
+
+def _pool(pid: str, windows: list[dict[str, Any]], scope: str = "models") -> dict[str, Any]:
+    return {"id": pid, "scope": scope, "windows": windows}
+
+
+def test_agent_layer_quota_parsing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    agy_cases = (
+        (
+            "neon",
+            [
+                _win(20, starts_at=QUOTA_WEEK_START),
+                _win(80, QUOTA_SHORT_SECONDS, starts_at="2026-11-27T09:30:00Z"),
+            ],
+            0.4,
+        ),
+        (
+            "zero",
+            [
+                _win(90, starts_at=QUOTA_WEEK_START, state="not_started"),
+                _win(0, QUOTA_SHORT_SECONDS),
+            ],
+            0.0,
+        ),
+        ("rolling", [_win(35, state="rolling", resets_at=QUOTA_WEEK_RESET)], 0.35),
+        ("unk", [_win(40, state="unknown", starts_at=QUOTA_WEEK_START)], None),
+        ("early", [_win(1, starts_at="2026-11-27T11:59:00Z")], 0.07),
+        ("future", [_win(0, starts_at="2026-11-27T12:05:00Z")], None),
+        ("past", [_win(40, resets_at="2026-11-27T11:00:00Z")], 0.4),
+    )
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "results": [
+            {
+                "agent": "claude",
+                "status": "ok",
+                "observed_at": QUOTA_NOW,
+                "blocked": False,
+                "pools": [
+                    _pool(
+                        "claude",
+                        [
+                            _win(30, starts_at=QUOTA_WEEK_START, resets_at=QUOTA_WEEK_RESET),
+                            _win(100, starts_at=QUOTA_WEEK_START, disabled=True),
+                        ],
+                        "all",
+                    ),
+                    _pool("fable_wk", [_win(45, resets_at=QUOTA_WEEK_RESET)]),
+                    _pool("web", [_win(100, starts_at=QUOTA_WEEK_START)], "other_surface"),
+                ],
+                "models": [
+                    {"id": "fable", "pools": ["claude", "fable_wk", "web"]},
+                    {"id": "opus", "pools": ["claude"]},
+                ],
+            },
+            {
+                "agent": "antigravity",
+                "status": "ok",
+                "observed_at": QUOTA_NOW,
+                "pools": [_pool(mid, wins) for mid, wins, _ in agy_cases],
+                "models": [{"id": mid, "pools": [mid]} for mid, _, _ in agy_cases],
+            },
+            {
+                "agent": "codex",
+                "status": "ok",
+                "attempted_at": QUOTA_NOW,
+                "blocked": True,
+                "pools": [
+                    _pool(
+                        "codex",
+                        [_win(25, QUOTA_SHORT_SECONDS, starts_at="2026-11-27T09:30:00Z")],
+                        "all",
+                    )
+                ],
+                "models": [{"id": "gpt-credits", "pools": ["codex"], "blocked": False}],
+            },
+            {
+                "agent": "nil",
+                "status": "ok",
+                "observed_at": QUOTA_NOW,
+                "pools": None,
+                "models": None,
+            },
+            {"agent": "muse", "status": "unavailable", "observed_at": QUOTA_NOW, "blocked": None},
+            {"agent": "unblk", "status": "error", "observed_at": QUOTA_NOW, "blocked": False},
+            {"agent": "grok", "status": "error", "observed_at": QUOTA_NOW, "blocked": True},
+        ],
+    }
+    responses = [
+        (EXIT_QUOTA_PARTIAL, json.dumps(payload)),
+        (EXIT_QUOTA_NONE, '{"schema_version": 1, "results": []}'),
+        (1, "{}"),
+        (0, "not-json"),
+        (0, '{"schema_version": 2, "results": []}'),
+    ]
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **_kw: subprocess.CompletedProcess(cmd, *responses.pop(0), stderr=""),
+    )
+    al = AgentLayer("al")
+    snap = al.quota(tmp_path)
+    obs = "2026-11-27T12:00:00+00:00"
+
+    assert snap.for_spec(AgentSpec(agent="claude", model="fable")).pace_ratio == pytest.approx(0.9)
+    assert snap.for_spec(AgentSpec(agent="claude", model="opus")).pace_ratio == pytest.approx(0.6)
+    assert snap.by_agent["antigravity"].pace_ratio is None
+    for mid, _, expected in agy_cases:
+        actual = snap.for_spec(AgentSpec(agent="antigravity", model=mid)).pace_ratio
+        assert actual is None if expected is None else actual == pytest.approx(expected)
+
+    credit_model = snap.for_spec(AgentSpec(agent="codex", model="gpt-credits"))
+    unlisted = snap.for_spec(AgentSpec(agent="codex", model="gpt-6.2-sol"))
+    assert credit_model.blocked is False and credit_model.pace_ratio == pytest.approx(0.5)
+    assert unlisted.blocked is True and unlisted.pace_ratio == pytest.approx(0.5)
+    assert snap.by_agent["nil"] == QuotaReading(blocked=False, observed_at=obs)
+    assert "muse" not in snap.by_agent and "unblk" not in snap.by_agent
+    assert snap.for_spec(AgentSpec(agent="grok")) == QuotaReading(blocked=True, observed_at=obs)
+
+    assert al.quota(tmp_path) == QuotaSnapshot()
+    for _ in range(3):
+        with pytest.raises(AgentLayerError):
+            al.quota(tmp_path)
+    assert not responses
+
+
+def test_session_dir_forwards_pythonpath_when_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    s1 = SessionDir(tmp_path / "s1")
+    s1.init(workflow="demo", role="lead")
+    env1 = json.loads(s1.mcp_config_path.read_text(encoding="utf-8"))["mcpServers"][
+        "castle-steward"
+    ]["env"]
+    assert "PATH" in env1 and "PYTHONPATH" not in env1
+
+    monkeypatch.setenv("PYTHONPATH", "/custom/workflows")
+    s2 = SessionDir(tmp_path / "s2")
+    s2.init(workflow="demo", role="lead")
+    env2 = json.loads(s2.mcp_config_path.read_text(encoding="utf-8"))["mcpServers"][
+        "castle-steward"
+    ]["env"]
+    assert env2["PYTHONPATH"] == "/custom/workflows"
 
 
 def test_fanout_parallel_ask_partial_reply_exclusivity_and_loop(tmp_path: Path) -> None:
@@ -533,7 +696,7 @@ def test_crash_recovery_all_boundaries_and_immutable_session_id(tmp_path: Path) 
             return FakeTurnOutcome()
         counts["finish"] += 1
         if counts["finish"] == 1:
-            return FakeTurnOutcome(state="failed", provider_started=True)
+            return FakeTurnOutcome(state="failed", provider_started=True, error="provider exploded")
         ctx.call_tool("submit_report", {"summary": "done"})
         return FakeTurnOutcome()
 
@@ -597,7 +760,7 @@ def test_crash_recovery_all_boundaries_and_immutable_session_id(tmp_path: Path) 
         assert st.phase == "paused" and counts["decide"] == 2
         eng.reply(jid, st.pending_waits[0].wait_id, {"ok": True})
 
-        with pytest.raises(TurnFailed):
+        with pytest.raises(TurnFailed, match="provider exploded"):
             eng.run(jid)
         with pytest.raises(SimulatedCrash):
             eng.run(jid)
