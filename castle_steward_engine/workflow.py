@@ -11,7 +11,7 @@ from types import MappingProxyType
 from typing import Annotated, Any, Final, Self, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints
 
 # --- Constants & reducer alias ---
 
@@ -25,6 +25,7 @@ ASK_TOOL_NAME: Final[str] = "ask"
 CHECK_DONE_TOOL_NAME: Final[str] = "check_done"
 
 AppendList = Annotated[list[T], operator.add]
+_NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 # --- Public author-facing SDK ---
@@ -35,9 +36,9 @@ class AgentSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, revalidate_instances="always")
 
-    agent: str
-    model: str | None = None
-    reasoning_effort: str | None = None
+    agent: _NonBlankStr
+    model: _NonBlankStr | None = None
+    reasoning_effort: _NonBlankStr | None = None
 
 
 class AvailableAgent(BaseModel):
@@ -45,9 +46,9 @@ class AvailableAgent(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    agent: str
-    default_model: str | None = None
-    default_reasoning_effort: str | None = None
+    agent: _NonBlankStr
+    default_model: _NonBlankStr | None = None
+    default_reasoning_effort: _NonBlankStr | None = None
     session_mcp: bool = False
 
 
@@ -58,7 +59,7 @@ class QuotaReading(BaseModel):
 
     blocked: bool = False
     pace_ratio: float | None = Field(default=None, ge=0.0, allow_inf_nan=False)
-    observed_at: str | None = None
+    observed_at: _NonBlankStr | None = None
 
 
 class QuotaSnapshot(BaseModel):

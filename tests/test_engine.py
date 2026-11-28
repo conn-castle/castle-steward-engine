@@ -21,6 +21,7 @@ from castle_steward_engine import (
     AgentLayerError,
     AgentSpec,
     AppendList,
+    AvailableAgent,
     Engine,
     EngineError,
     Graph,
@@ -308,7 +309,8 @@ def test_real_agent_layer_cli_contract(tmp_path: Path, monkeypatch: pytest.Monke
                     {
                         "agent": "legacy",
                         "available": True,
-                        "model": {"configured": ""},
+                        "model": {"configured": "   "},
+                        "reasoning_effort": {"configured": ""},
                         "session_mcp_servers": {"supported": False},
                     },
                 ]
@@ -394,8 +396,16 @@ def test_real_agent_layer_cli_contract(tmp_path: Path, monkeypatch: pytest.Monke
     )
     with pytest.raises(ValidationError):
         QuotaReading(pace_ratio=-0.1)
+    for bad_spec in ({"agent": "  "}, {"agent": "codex", "model": ""}):
+        with pytest.raises(ValidationError):
+            AgentSpec.model_validate(bad_spec)
+        with pytest.raises(ValidationError):
+            AvailableAgent.model_validate(
+                {"agent": bad_spec["agent"], "default_model": bad_spec.get("model")}
+            )
     opts = al.options(tmp_path)
     assert opts["codex"].session_mcp is True and opts["legacy"].session_mcp is False
+    assert opts["legacy"].default_model is None and opts["legacy"].default_reasoning_effort is None
     res = al.reserve_start(tmp_path)
     assert res.handle == "h1" and res.invocation_id == "inv1" and res.state == "reserved"
     started = al.start(

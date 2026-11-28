@@ -15,6 +15,7 @@ from castle_steward_coding.tools import MergeGateOutcome, ReviewFindings
 from castle_steward_engine import AgentSpec, AppendList
 
 _NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+_NonEmptyStr = Annotated[str, StringConstraints(min_length=1)]
 _STATE_MODEL_CONFIG = ConfigDict(extra="forbid", frozen=True, revalidate_instances="always")
 
 
@@ -125,7 +126,7 @@ class PlanVersion(BaseModel):
     model_config = _STATE_MODEL_CONFIG
 
     text: _NonBlankStr  # Markdown plan text submitted by the coder
-    ref: str | None = None  # Workspace-relative mirror path set by save_plan/save_revised_plan
+    ref: _NonEmptyStr | None = None  # Mirror path set by save_plan/save_revised_plan
 
 
 class ReviewRecord(BaseModel):
@@ -134,12 +135,12 @@ class ReviewRecord(BaseModel):
     model_config = _STATE_MODEL_CONFIG
 
     stage: Literal["plan", "code"]  # Review stage (plan or code)
-    revision: int  # Code revision index active during review
+    revision: int = Field(ge=0)  # Code revision index active during review
     reviewer: _NonBlankStr  # Assigned reviewer profile name (e.g., opus_high, grok)
     approved: bool  # Whether the reviewer approved without blocking concerns
-    summary: str  # Concise review summary
-    findings: tuple[str, ...] = ()  # Concrete actionable review findings
-    head_sha: str | None = None  # Reviewed commit SHA (None for plan reviews)
+    summary: _NonBlankStr  # Concise review summary
+    findings: tuple[_NonBlankStr, ...] = ()  # Concrete actionable review findings
+    head_sha: _NonBlankStr | None = None  # Reviewed commit SHA (None for plan reviews)
 
 
 class RepairTriageVerdict(BaseModel):
@@ -147,7 +148,7 @@ class RepairTriageVerdict(BaseModel):
 
     model_config = _STATE_MODEL_CONFIG
 
-    head_sha: str  # Exact repair commit SHA that was triaged
+    head_sha: _NonBlankStr  # Exact repair commit SHA that was triaged
     needs_code_review: bool  # Whether the repair commit requires another code review pass
     reason: _NonBlankStr  # Repair triage rationale
 
@@ -157,8 +158,8 @@ class CodeRevision(BaseModel):
 
     model_config = _STATE_MODEL_CONFIG
 
-    base_sha: str  # Pre-revision commit SHA (lineage & diff base for verify/review/triage)
-    head_sha: str  # Latest verified commit SHA (== base_sha at initial baseline before implement)
+    base_sha: _NonBlankStr  # Pre-revision commit SHA (lineage & diff base for verify/review/triage)
+    head_sha: _NonBlankStr  # Latest verified SHA (== base_sha at baseline before implement)
     triage: RepairTriageVerdict | None = None  # Post-repair triage (populated on revisions >= 1)
 
 
@@ -168,8 +169,8 @@ class MergeGateVerdict(BaseModel):
     model_config = _STATE_MODEL_CONFIG
 
     decision: MergeGateOutcome  # Gate decision for this shipment
-    head_sha: str  # Exact PR head commit SHA evaluated by merge_gate
-    reason: str  # Rationale for the merge-gate decision
+    head_sha: _NonBlankStr  # Exact PR head commit SHA evaluated by merge_gate
+    reason: _NonBlankStr  # Rationale for the merge-gate decision
 
 
 class MergeApprovalReply(BaseModel):
@@ -185,9 +186,9 @@ class PrAttempt(BaseModel):
 
     model_config = _STATE_MODEL_CONFIG
 
-    head_sha: str  # Exact commit SHA pushed by this ship_pr attempt
+    head_sha: _NonBlankStr  # Exact commit SHA pushed by this ship_pr attempt
     readiness: PrReadiness | None = None  # GitHub check/mergeability snapshot for this shipment
-    context_ref: str | None = None  # Workspace-relative mirror path for merge-gate context
+    context_ref: _NonEmptyStr | None = None  # Workspace-relative mirror path for merge-gate context
     verdict: MergeGateVerdict | None = None  # merge_gate decision for this shipment
     approval: MergeApprovalReply | None = None  # Human ask_approval reply for this shipment
     merge: MergeResult | None = None  # merge_exact_head / verify_merge / cleanup outcome
@@ -198,7 +199,7 @@ class PullRequest(BaseModel):
 
     model_config = _STATE_MODEL_CONFIG
 
-    number: int = Field(gt=0)  # GitHub PR number opened or updated by ship_pr
+    number: StrictInt = Field(gt=0)  # GitHub PR number opened or updated by ship_pr
     attempts: tuple[PrAttempt, ...] = Field(min_length=1)  # Chronological PR shipment attempts
 
     @property
@@ -224,9 +225,9 @@ class EscalationRecord(BaseModel):
     model_config = _STATE_MODEL_CONFIG
 
     revision: int = Field(ge=0)  # Revision index active when escalation paused
-    reason: str  # Failure reason presented to the human
+    reason: _NonBlankStr  # Failure reason presented to the human
     action: Literal["retry", "abort"]  # Human escalation decision
-    instructions: str = ""  # Optional live human retry instructions for repair and triage
+    instructions: _NonBlankStr | None = None  # Optional live human retry instructions
 
 
 class RetryCounters(BaseModel):
@@ -261,7 +262,7 @@ class VerifiedPr(BaseModel):
 
     model_config = _STATE_MODEL_CONFIG
 
-    pr_number: int = Field(gt=0)
+    pr_number: StrictInt = Field(gt=0)
     head_sha: _NonBlankStr
 
 
@@ -364,20 +365,20 @@ class ShipStateBase(WorkflowState):
             return RepairCause(kind="pr_not_ready", details=attempt.readiness.reasons)
         return None
 
-    def _retry_instructions(self, *, for_revision: int) -> str:
+    def _retry_instructions(self, *, for_revision: int) -> str | None:
         if (
             self.escalations
             and (last := self.escalations[-1]).action == "retry"
             and last.revision == for_revision
         ):
             return last.instructions
-        return ""
+        return None
 
     # `repair` runs before `repair.then` appends the new revision; `triage_repair` runs after.
-    def repair_instructions(self) -> str:
+    def repair_instructions(self) -> str | None:
         return self._retry_instructions(for_revision=self.revision)
 
-    def triage_instructions(self) -> str:
+    def triage_instructions(self) -> str | None:
         return self._retry_instructions(for_revision=self.revision - 1)
 
 
@@ -411,11 +412,11 @@ class ReviewItem(BaseModel):
     reviewer: _NonBlankStr
     agent: AgentSpec
     checkout: Path
-    task: str
-    revision: int
-    plan_ref: str | None = None
-    baseline: str | None = None
-    reviewed_head: str | None = None
+    task: _NonBlankStr
+    revision: int = Field(ge=0)
+    plan_ref: _NonEmptyStr | None = None
+    baseline: _NonBlankStr | None = None
+    reviewed_head: _NonBlankStr | None = None
 
     def to_review(self, findings: ReviewFindings) -> ReviewRecord:
         return ReviewRecord(
@@ -438,4 +439,4 @@ class EscalationReply(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     action: Literal["retry", "abort"]
-    instructions: str = ""
+    instructions: _NonBlankStr | None = None

@@ -44,6 +44,7 @@ from castle_steward_coding.github import (
 from castle_steward_coding.models import (
     CodeRevision,
     EscalationRecord,
+    EscalationReply,
     MergeApprovalReply,
     MergeGateVerdict,
     PlanVersion,
@@ -1380,7 +1381,7 @@ def test_prompts_omit_checkout_use_plan_ref_and_isolate_retry_instructions(
     assert "Human Escalation History" not in render_merge_gate_context(
         st_rev0.model_copy(update={"escalations": []}), pr_bounced
     )
-    no_instr = EscalationRecord(revision=0, reason="fix bug", action="retry", instructions="")
+    no_instr = EscalationRecord(revision=0, reason="fix bug", action="retry")
     no_instr_ctx = render_merge_gate_context(
         st_rev0.model_copy(update={"escalations": [no_instr]}), pr_bounced
     )
@@ -1492,8 +1493,30 @@ def test_input_checkout_and_submission_constraints(tmp_path: Path) -> None:
     for bad_mirror in (Path("/tmp/cache"), Path("."), Path("../escape"), Path("a/../b")):
         with pytest.raises(ValidationError, match="artifact_mirror_dir"):
             CodingConfig.model_validate({"artifact_mirror_dir": bad_mirror})
-    with pytest.raises(ValidationError, match="greater than 0"):
-        VerifiedPr(pr_number=0, head_sha="a")
+    assert EscalationReply(action="retry").instructions is None
+    for bad_instr in ("", "   "):
+        with pytest.raises(ValidationError):
+            EscalationReply(action="retry", instructions=bad_instr)
+    for bad_pr in (0, True):
+        with pytest.raises(ValidationError):
+            VerifiedPr.model_validate({"pr_number": bad_pr, "head_sha": "a"})
+        with pytest.raises(ValidationError):
+            PullRequest.model_validate({"number": bad_pr, "attempts": [{"head_sha": "a"}]})
+        with pytest.raises(ValidationError):
+            PrReadiness.model_validate(
+                {
+                    "pr_number": bad_pr,
+                    "url": "",
+                    "head_sha": "",
+                    "head_branch": "",
+                    "base_branch": "",
+                    "ready": False,
+                }
+            )
+        with pytest.raises(ValidationError):
+            MergeResult.model_validate({"status": "merged", "pr_number": bad_pr, "head_sha": "a"})
+    with pytest.raises(ValidationError):
+        ReviewRecord(stage="code", revision=-1, reviewer="grok", approved=True, summary="ok")
     with pytest.raises(ValidationError, match="at least 1 character"):
         WrittenPlan(plan="  \n\t ")
     with pytest.raises(ValidationError):

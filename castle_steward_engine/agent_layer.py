@@ -149,6 +149,13 @@ class _QuotaResponse(_WireModel):
     results: list[_QuotaResult]
 
 
+def _configured_opt(cfg: object) -> object:
+    if not isinstance(cfg, dict):
+        return None
+    raw = cfg.get("configured")
+    return (raw.strip() or None) if isinstance(raw, str) else raw
+
+
 def _looks_like_no_provider_conversation(text: str) -> bool:
     lower = text.lower()
     return any(needle in lower for needle in _NO_PROVIDER_CONVERSATION_PATTERNS)
@@ -267,23 +274,17 @@ class AgentLayer:
         for entry in data.get("agents", []):
             if not isinstance(entry, dict) or not entry.get("available"):
                 continue
-            name = str(entry["agent"])
-            model_cfg = entry.get("model")
-            default_model = (
-                model_cfg.get("configured") or None if isinstance(model_cfg, dict) else None
-            )
-            effort_cfg = entry.get("reasoning_effort")
-            default_effort = (
-                effort_cfg.get("configured") or None if isinstance(effort_cfg, dict) else None
-            )
             mcp_cfg = entry.get("session_mcp_servers")
             session_mcp = bool(isinstance(mcp_cfg, dict) and mcp_cfg.get("supported"))
-            result[name] = AvailableAgent(
-                agent=name,
-                default_model=default_model,
-                default_reasoning_effort=default_effort,
-                session_mcp=session_mcp,
+            agent = AvailableAgent.model_validate(
+                {
+                    "agent": str(entry["agent"]),
+                    "default_model": _configured_opt(entry.get("model")),
+                    "default_reasoning_effort": _configured_opt(entry.get("reasoning_effort")),
+                    "session_mcp": session_mcp,
+                }
             )
+            result[agent.agent] = agent
         return result
 
     def quota(self, workdir: Path | None = None) -> QuotaSnapshot:

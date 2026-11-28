@@ -133,13 +133,12 @@ def _render_escalations_section(state: ShipStateBase) -> str:
         return ""
     entries: list[str] = []
     for e in state.escalations:
-        cleaned = e.instructions.strip()
-        if cleaned:
+        if e.instructions is not None:
             entries.append(
                 tpl.MERGE_CONTEXT_ESCALATION_LINE_WITH_INSTRUCTIONS.format(
                     revision=e.revision,
                     action=e.action,
-                    instructions=cleaned,
+                    instructions=e.instructions,
                     reason=e.reason,
                 )
             )
@@ -206,9 +205,8 @@ def render_merge_gate_context(state: ShipStateBase, pr: PullRequest) -> str:
     return "\n\n".join(section for section in sections if section) + "\n"
 
 
-def _format_human_instructions(raw: str) -> str:
-    cleaned = raw.strip()
-    return tpl.HUMAN_INSTRUCTIONS_SECTION.format(instructions=cleaned) if cleaned else ""
+def _format_human_instructions(raw: str | None) -> str:
+    return tpl.HUMAN_INSTRUCTIONS_SECTION.format(instructions=raw) if raw is not None else ""
 
 
 def task_summary(state: WorkflowState) -> str:

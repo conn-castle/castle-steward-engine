@@ -8,11 +8,13 @@ import subprocess
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints
 
 MergeMethod = Literal["squash", "merge", "rebase"]
+_NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+_NonEmptyStr = Annotated[str, StringConstraints(min_length=1)]
 SHORT_SHA_LENGTH = 12
 _REPO_LOCAL_GIT_ENV = frozenset(
     {
@@ -50,7 +52,7 @@ class GitHubError(RuntimeError):
 class PrReadiness(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, revalidate_instances="always")
 
-    pr_number: int
+    pr_number: StrictInt = Field(gt=0)
     url: str
     head_sha: str
     head_branch: str
@@ -64,10 +66,10 @@ class MergeResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, revalidate_instances="always")
 
     status: Literal["merged", "readiness_changed"]
-    pr_number: int
-    head_sha: str
-    merge_commit_sha: str | None = None
-    cleaned_branch: str | None = None
+    pr_number: StrictInt = Field(gt=0)
+    head_sha: _NonBlankStr
+    merge_commit_sha: _NonBlankStr | None = None
+    cleaned_branch: _NonEmptyStr | None = None
     reasons: tuple[str, ...] = ()
 
 
@@ -324,7 +326,10 @@ def _classify_rollup_item(item: dict[str, Any]) -> tuple[Literal["ok", "pending"
 
 
 def _eval_readiness(data: dict[str, Any], head: str) -> PrReadiness:
-    number = int(data["number"])
+    raw_number = data.get("number")
+    if type(raw_number) is not int or raw_number <= 0:
+        raise GitHubError(f"Pull request has invalid number: {raw_number!r}")
+    number = raw_number
     pr_head = str(data.get("headRefOid") or "")
     state = str(data.get("state") or "")
     is_draft = bool(data.get("isDraft", False))

@@ -17,6 +17,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import registry
 from sqlmodel import Field, MetaData, Session, SQLModel, col, create_engine, or_, select, update
+from sqlmodel.sql.sqltypes import AutoString
 
 from castle_steward_engine.workflow import AgentSpec
 
@@ -109,7 +110,7 @@ class TurnRecord(_StoreBase, table=True):
     session_name: str
     al_handle: str
     al_invocation_id: str
-    status: str
+    status: TurnStatus = Field(sa_type=AutoString)
     prompt_path: str
     created_at: str
     completed_at: str | None = None

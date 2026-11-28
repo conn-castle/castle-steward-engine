@@ -63,7 +63,7 @@ class ReviewFindings(BaseModel):
         )
     )
     summary: _NonBlankStr = Field(description="Short summary of your review (1-2 sentences).")
-    findings: tuple[str, ...] = Field(
+    findings: tuple[_NonBlankStr, ...] = Field(
         default=(),
         description=(
             "List of specific problems to fix, one per item "
@@ -78,7 +78,7 @@ class MergeGateDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     decision: MergeGateOutcome = Field(description="Next action for the pull request.")
-    head_sha: str = Field(
+    head_sha: _NonBlankStr = Field(
         description="Full 40-character Git commit SHA of the pull request head you evaluated."
     )
     reason: _NonBlankStr = Field(
@@ -110,7 +110,7 @@ class RepairTriage(BaseModel):
             "Set to false for safe mechanical fixes like formatting, lint, types, or docs."
         )
     )
-    head_sha: str = Field(
+    head_sha: _NonBlankStr = Field(
         description="Full 40-character Git commit SHA of the repair commit you evaluated."
     )
     reason: _NonBlankStr = Field(

@@ -19,6 +19,7 @@ from mcp.server.stdio import stdio_server
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     JsonValue,
     StringConstraints,
     ValidationError,
@@ -33,6 +34,7 @@ from castle_steward_engine.workflow import (
 )
 
 _NonBlankStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+_NonEmptyStr = Annotated[str, StringConstraints(min_length=1)]
 
 _SESSION_META_FILENAME = "session.json"
 _MCP_CONFIG_FILENAME = "mcp-config.json"
@@ -48,19 +50,19 @@ _MCP_SERVER_NAME = "castle-steward"
 class SessionMeta(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    workflow: str
-    role: str
+    workflow: _NonBlankStr
+    role: _NonBlankStr
 
 
 class ActiveTurn(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    turn_key: str
-    attempt: int
-    expects_tool: str | None = None
-    expects_check: str | None = None
+    turn_key: _NonBlankStr
+    attempt: int = Field(ge=1)
+    expects_tool: _NonBlankStr | None = None
+    expects_check: _NonBlankStr | None = None
     context: dict[str, JsonValue]
-    turn_dir: str
+    turn_dir: _NonEmptyStr
 
     @model_validator(mode="after")
     def _require_exactly_one_expectation(self) -> ActiveTurn:
